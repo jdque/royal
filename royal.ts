@@ -20,8 +20,56 @@ interface Guard {
     proceed: () => void;
 }
 
+interface Wrapper {
+    name: string;
+    enter: (state: State) => EnterReq;
+    exit: (state: State) => ExitReq;
+    between: (from: State, to: State) => BetweenReq;
+}
+
+interface Request {
+    __type: 'enter' | 'exit' | 'between';
+}
+
+interface EnterReq extends Request {
+    __type: 'enter';
+    name: string;
+    state: State;
+}
+
+interface ExitReq extends Request {
+    __type: 'exit';
+    name: string;
+    state: State;
+}
+
+interface BetweenReq extends Request {
+    __type: 'between';
+    name: string;
+    from: State;
+    to: State;
+}
+
+function isEnterReq(req: Request): req is EnterReq {
+    return req.__type === 'enter';
+}
+
+function isExitReq(req: Request): req is ExitReq {
+    return req.__type === 'exit';
+}
+
+function isBetweenReq(req: Request): req is BetweenReq {
+    return req.__type === 'between';
+}
+
 function isHandler(obj: any): obj is Handler {
     return 'enter' in obj && 'exit' in obj;
+}
+
+function makeTransition(name: string, state: State): Transition {
+    let transition = {};
+    transition[name] = state;
+    return transition;
 }
 
 function unpack<T>(obj: {[key: string]: T}): [string, T] {
@@ -131,6 +179,34 @@ export class HSM {
         }
         if ('requireHandler' in config) {
             this.config.requireHandler = config.requireHandler;
+        }
+    }
+
+    get(name: string): Wrapper {
+        return {
+            name,
+            enter: (state: State): EnterReq => {
+                return { __type: 'enter', name, state };
+            },
+            exit: (state: State): ExitReq => {
+                return { __type: 'exit', name, state };
+            },
+            between: (from: State, to: State): BetweenReq => {
+                return { __type: 'between', name, from, to };
+            }
+        }
+    }
+
+    on(request: EnterReq | ExitReq | BetweenReq, handler: Handler | EnterFunc | GuardFunc): void {
+        if (isEnterReq(request)) {
+            let transition = makeTransition(request.name, request.state);
+            this.when(transition, handler as Handler | EnterFunc);
+        }
+        if (isExitReq(request)) {
+
+        }
+        if (isBetweenReq(request)) {
+
         }
     }
 
