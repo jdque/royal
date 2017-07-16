@@ -1,20 +1,29 @@
-type State      = string;
-type Transition = {[name: string]: State};
-type EnterFunc  = (hsm: HSM, data?: any) => void;
-type UpdateFunc = (hsm: HSM, delta: number) => void;
-type ExitFunc   = () => void;
-type GuardFunc  = (guard: Guard) => void;
+type State = string;
+type Transition = {[from: string]: /*to:*/ State};
 
-interface HSMConfig {
-    debug: boolean;
-    requireHandler: boolean;
+interface EnterFunc<T> {
+    (t: T, data?: object): ExitFunc<T> | void;
 }
 
-interface Handler {
-    enter: EnterFunc;
-    update: UpdateFunc;
-    exit: ExitFunc;
+interface UpdateFunc<T> {
+    (t: T, delta: number): void;
 }
+
+interface ExitFunc<T> {
+    (): void;
+}
+
+interface Handler<T> {
+    enter: EnterFunc<T>;
+    update: UpdateFunc<T>;
+    exit: ExitFunc<T>;
+}
+
+type StateEnterFunc = EnterFunc<HSM>;
+type StateExitFunc = ExitFunc<HSM>;
+type StateHandler = Handler<HSM>;
+type TransEnterFunc = EnterFunc<Guard>;
+type TransHandler = Handler<Guard>;
 
 interface Guard {
     proceed: () => void;
@@ -50,6 +59,11 @@ interface BetweenReq extends Request {
     to: State;
 }
 
+interface HSMConfig {
+    debug: boolean;
+    requireHandler: boolean;
+}
+
 function isEnterReq(req: Request): req is EnterReq {
     return req.__type === 'enter';
 }
@@ -62,13 +76,25 @@ function isBetweenReq(req: Request): req is BetweenReq {
     return req.__type === 'between';
 }
 
-function isHandler(obj: any): obj is Handler {
-    return 'enter' in obj && 'exit' in obj;
+function isHandler<T>(obj: any): obj is Handler<T> {
+   return 'enter' in obj;
 }
 
-function makeTransition(name: string, state: State): Transition {
+function isTransition(node: Node, transition: any): transition is Transition {
+    if (!node) {
+        return false;
+    }
+    if (typeof transition !== 'object') {
+        return false;
+    }
+    let [from, to] = unpack<string>(transition);
+    return (node.hasState(from) || from === '*') &&
+           (node.hasState(to) || to === '*');
+}
+
+function makeTransition(from: State, to: State): Transition {
     let transition = {};
-    transition[name] = state;
+    transition[from] = to;
     return transition;
 }
 
@@ -110,8 +136,8 @@ export class HSM {
     private config: HSMConfig;
     private nodeOf: {[name: string]: Node};
     private stateOf: {[name: string]: State};
-    private handlerOf: {[name: string]: {[state: string]: Handler}};
-    private guardOf: {[name: string]: GuardFunc}
+    private handlerOf: {[name: string]: {[state: string]: StateHandler}};
+    private guardOf: {[name: string]: {[from: string]: {[to: string]: TransHandler}}};
 
     private constructor(node: Node, parent?: HSM) {
         this.parent = parent;
@@ -144,7 +170,7 @@ export class HSM {
         this.nodeOf[name] = node;
         this.stateOf[name] = null;
         this.handlerOf[name] = {};
-        this.guardOf[name] = null;
+        this.guardOf[name] = {};
     }
 
     private execTransition(target: Node, newState: State, data: any) {
@@ -164,7 +190,10 @@ export class HSM {
         this.stateOf[target.name] = newState;
         let newHandler = this.handlerOf[target.name][newState];
         if (newHandler) {
-            newHandler.enter(new HSM(target, this), data);
+            let exitFunc = newHandler.enter(new HSM(target, this), data);
+            if (exitFunc && !newHandler.exit) {
+                newHandler.exit = exitFunc;
+            }
         }
         else {
             if (this.config.requireHandler) {
@@ -173,12 +202,141 @@ export class HSM {
         }
     }
 
+    private execGuard(target: Node, from: State, to: State, data: any) {
+        let fromGuards = this.guardOf[target.name];
+        let toGuards = fromGuards[from] || fromGuards['*'];
+        let handler = toGuards[to] || toGuards['*'];
+        let guard = {
+            proceed: () => {
+                if (handler.exit) {
+                    handler.exit();
+                }
+                this.execTransition(target, to, data);
+            }
+        }
+        let exitFunc = handler.enter(guard, data);
+        if (exitFunc && !handler.exit) {
+            handler.exit = exitFunc;
+        }
+    }
+
+    private isGuarded(target: Node, from: State, to: State): boolean {
+        let fromGuards = this.guardOf[target.name];
+        if (!fromGuards) {
+            return false;
+        }
+        let toGuards = fromGuards[from] || fromGuards['*'];
+        if (!toGuards) {
+            return false;
+        }
+        let handler = toGuards[to] || toGuards['*'];
+        if (!handler) {
+            return false;
+        }
+
+        return true;
+    }
+
     configure(config: Partial<HSMConfig>) {
         if ('debug' in config) {
             this.config.debug = config.debug;
         }
         if ('requireHandler' in config) {
             this.config.requireHandler = config.requireHandler;
+        }
+    }
+
+    when(name: string, state: State, handlerOrFunc: StateHandler | StateEnterFunc);
+    when(name: string, transition: Transition, handlerOrFunc: TransHandler | TransEnterFunc);
+    when(name: string, stateOrTransition: State | Transition, handlerOrFunc: any): void {
+        let target = this.nodeOf[name];
+        if (!target) {
+            throw new Error(`Name doesn't exist in this context: ${name}`);
+        }
+
+        if (isTransition(target, stateOrTransition)) {
+            let [from, to] = unpack(stateOrTransition);
+            if (!target.hasState(from) && from !== '*') {
+                throw new Error(`${name} doesn't have state: ${from}`);
+            }
+            if (!target.hasState(to) && to !== '*') {
+                throw new Error(`${name} doesn't have state: ${to}`);
+            }
+
+            let handler: TransHandler = null;
+            if (isHandler(handlerOrFunc)) {
+                handler = <TransHandler>handlerOrFunc;
+            }
+            else if (typeof handlerOrFunc === 'function') {
+                handler = {
+                    enter: <TransEnterFunc>handlerOrFunc,
+                    update: null,
+                    exit: null
+                };
+            }
+
+            let guards = this.guardOf[target.name];
+            if (!guards[from]) {
+                guards[from] = {};
+            }
+            guards[from][to] = handler;
+        }
+        else {
+            let state = stateOrTransition;
+            if (!target.hasState(state)) {
+                throw new Error(`${name} doesn't have state: ${state}`);
+            }
+
+            let handler: StateHandler = null;
+            if (isHandler(handlerOrFunc)) {
+                handler = <StateHandler>handlerOrFunc;
+            }
+            else if (typeof handlerOrFunc === 'function') {
+                handler = {
+                    enter: <StateEnterFunc>handlerOrFunc,
+                    update: null,
+                    exit: null
+                };
+            }
+
+            this.handlerOf[target.name][state] = handler;
+        }
+    }
+
+    tell(name: string, state: State, data?: object): void {
+        let target = this.nodeOf[name];
+        if (!target) {
+            throw new Error(`Name doesn't exist in this context: ${name}`);
+        }
+        if (!target.hasState(state)) {
+            throw new Error(`${target.name} doesn't have state: ${state}`);
+        }
+
+        let curState = this.stateOf[target.name];
+        if (this.isGuarded(target, curState, state)) {
+            this.execGuard(target, curState, state, data);
+        }
+        else {
+            this.execTransition(target, state, data);
+        }
+    }
+
+    ask(name: string, state: State, data?: object): void {
+        if (!this.parent) {
+            throw new Error("Current context has no parent");
+        }
+
+        this.parent.tell(name, state, data);
+    }
+
+    set(name: string, state: State, data?: object): void;
+    set(state: State, data?: object): void;
+    set(nameOrState: string | State, stateOrData?: State | object, data?: object): void {
+        if (typeof stateOrData === 'string') {
+            this.tell(nameOrState, stateOrData, data);
+        }
+        else if (typeof stateOrData === 'object' || !stateOrData) {
+            this.ask(this.node.name, nameOrState, stateOrData);
         }
     }
 
@@ -197,100 +355,37 @@ export class HSM {
         }
     }
 
-    on(request: EnterReq | ExitReq | BetweenReq, handler: Handler | EnterFunc | GuardFunc): void {
+    on(request: EnterReq, func: StateEnterFunc): void;
+    on(request: ExitReq, func: StateExitFunc): void;
+    on(request: BetweenReq, func: TransEnterFunc): void;
+    on(request: Request, func: Function): void {
         if (isEnterReq(request)) {
-            let transition = makeTransition(request.name, request.state);
-            this.when(transition, handler as Handler | EnterFunc);
+            this.when(request.name, request.state, <StateEnterFunc>func);
         }
-        if (isExitReq(request)) {
-
+        else if (isExitReq(request)) {
+            //TODO
         }
-        if (isBetweenReq(request)) {
-
+        else if (isBetweenReq(request)) {
+            let transition = makeTransition(request.from, request.to);
+            this.when(request.name, transition, <TransEnterFunc>func);
         }
-    }
-
-    when(transition: Transition, handler: Handler | EnterFunc): void {
-        let [name, state] = unpack(transition);
-        let target = this.nodeOf[name];
-
-        if (!target) {
-            throw new Error(`Name doesn't exist in this context: ${name}`);
-        }
-        else if (!target.hasState(state)) {
-            throw new Error(`${name} doesn't have state: ${state}`);
-        }
-
-        let useHandler: Handler = null;
-        if (isHandler(handler)) {
-            useHandler = handler;
-        }
-        else if (typeof handler === 'function') {
-            useHandler = {
-                enter: handler,
-                update: (hsm: HSM, delta: number) => {},
-                exit: () => {}
-            };
-        }
-        this.handlerOf[target.name][state] = useHandler;
-    }
-
-    tell(transition: Transition, data?: any): void {
-        let [name, state] = unpack(transition);
-        let target = this.nodeOf[name];
-
-        if (!target) {
-            throw new Error(`Name doesn't exist in this context: ${name}`);
-        }
-        if (!target.hasState(state)) {
-            throw new Error(`${target.name} doesn't have state: ${state}`);
-        }
-
-        let guardFunc = this.guardOf[name];
-        if (guardFunc) {
-            let guard = {
-                proceed: () => { this.execTransition(target, state, data); }
-            };
-            guardFunc(guard);
-            return;
-        }
-
-        this.execTransition(target, state, data);
-    }
-
-    ask(transition: Transition, data?: any): void {
-        if (!this.parent) {
-            throw new Error("Current context has no parent");
-        }
-
-        this.parent.tell(transition, data);
-    }
-
-    set(transition: Transition | State, data?: any): void {
-        if (typeof transition === 'object') {
-            this.tell(transition, data);
-        }
-        else if (typeof transition === 'string') {
-            this.ask({[this.node.name]: transition}, data);
-        }
-    }
-
-
-    guard(nameToFunc: {[name: string]: GuardFunc}) {
-        let [name, func] = unpack(nameToFunc);
-        this.guardOf[name] = func;
     }
 
     update(delta: number): void {
         for (let name in this.stateOf) {
             let state = this.stateOf[name];
-            if (state != null) {
-                this.handlerOf[name][state].update(this, delta);
+            if (!state) {
+                continue;
             }
+            let handler = this.handlerOf[name][state];
+            if (!handler || !handler.update) {
+                continue;
+            }
+            this.handlerOf[name][state].update(this, delta);
         }
     }
 
-    getHandlers(): Handler[] {
+    getHandlers(): StateHandler[] {
         let handlers = [];
         for (let name in this.stateOf) {
             let state = this.stateOf[name];
@@ -302,7 +397,7 @@ export class HSM {
         return handlers;
     }
 
-    getHandler(name: string): Handler {
+    getHandler(name: string): StateHandler {
         let state = this.stateOf[name];
         let handler = this.handlerOf[name][state];
 
