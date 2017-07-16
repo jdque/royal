@@ -2,7 +2,7 @@ type State = string;
 type Transition = {[from: string]: /*to:*/ State};
 
 interface EnterFunc<T> {
-    (t: T, data?: object): ExitFunc<T> | void;
+    (t: T, data?: object): ExitFunc<T> | boolean | void;
 }
 
 interface UpdateFunc<T> {
@@ -59,6 +59,8 @@ interface BetweenReq extends Request {
     to: State;
 }
 
+type NodeBuildFunc = (name: string, states: State[], children?: Node[]) => Node;
+
 interface HSMConfig {
     debug: boolean;
     requireHandler: boolean;
@@ -80,16 +82,8 @@ function isHandler<T>(obj: any): obj is Handler<T> {
    return 'enter' in obj;
 }
 
-function isTransition(node: Node, transition: any): transition is Transition {
-    if (!node) {
-        return false;
-    }
-    if (typeof transition !== 'object') {
-        return false;
-    }
-    let [from, to] = unpack<string>(transition);
-    return (node.hasState(from) || from === '*') &&
-           (node.hasState(to) || to === '*');
+function isTransition(transition: any): transition is Transition {
+    return typeof transition === 'object' && Object.keys(transition).length === 1;
 }
 
 function makeTransition(from: State, to: State): Transition {
@@ -120,12 +114,21 @@ class Node {
         }
     }
 
+    static create(name: string, states: State[], children: Node[] = []) : Node {
+        return new Node(name, states, children);
+    }
+
     getChild(name: string): Node {
         return this.childMap[name];
     }
 
     hasState(state: State): boolean {
         return this.states.indexOf(state) >= 0;
+    }
+
+    hasTransition(from: State, to: State): boolean {
+        return (this.hasState(from) || from === '*') &&
+               (this.hasState(to) || to === '*');
     }
 }
 
@@ -165,6 +168,11 @@ export class HSM {
         return hsm;
     }
 
+    static build(buildFunc: (nodeBuildFunc: NodeBuildFunc) => Node): HSM {
+        let tree = buildFunc(Node.create);
+        return HSM.create(tree);
+    }
+
     private initChild(node: Node) {
         let name = node.name;
         this.nodeOf[name] = node;
@@ -188,17 +196,14 @@ export class HSM {
         }
 
         this.stateOf[target.name] = newState;
+
         let newHandler = this.handlerOf[target.name][newState];
-        if (newHandler) {
-            let exitFunc = newHandler.enter(new HSM(target, this), data);
-            if (exitFunc && !newHandler.exit) {
-                newHandler.exit = exitFunc;
-            }
+        if (!newHandler && this.config.requireHandler) {
+            throw new Error(`No handler registered for: ${target.name} => ${newState}`)
         }
-        else {
-            if (this.config.requireHandler) {
-                throw new Error(`No handler registered for: ${target.name} => ${newState}`)
-            }
+        let enterRes = newHandler.enter(new HSM(target, this), data);
+        if (typeof enterRes === 'function' && !newHandler.exit) {
+            newHandler.exit = enterRes;
         }
     }
 
@@ -213,10 +218,13 @@ export class HSM {
                 }
                 this.execTransition(target, to, data);
             }
+        };
+        let enterRes = handler.enter(guard, data);
+        if (enterRes === true) {
+            guard.proceed();
         }
-        let exitFunc = handler.enter(guard, data);
-        if (exitFunc && !handler.exit) {
-            handler.exit = exitFunc;
+        else if (typeof enterRes === 'function' && !handler.exit) {
+            handler.exit = enterRes;
         }
     }
 
@@ -248,19 +256,16 @@ export class HSM {
 
     when(name: string, state: State, handlerOrFunc: StateHandler | StateEnterFunc);
     when(name: string, transition: Transition, handlerOrFunc: TransHandler | TransEnterFunc);
-    when(name: string, stateOrTransition: State | Transition, handlerOrFunc: any): void {
+    when(name: string, stateOrTransition: any, handlerOrFunc: any): void {
         let target = this.nodeOf[name];
         if (!target) {
             throw new Error(`Name doesn't exist in this context: ${name}`);
         }
 
-        if (isTransition(target, stateOrTransition)) {
+        if (isTransition(stateOrTransition)) {
             let [from, to] = unpack(stateOrTransition);
-            if (!target.hasState(from) && from !== '*') {
-                throw new Error(`${name} doesn't have state: ${from}`);
-            }
-            if (!target.hasState(to) && to !== '*') {
-                throw new Error(`${name} doesn't have state: ${to}`);
+            if (!target.hasTransition(from, to) && from !== '*') {
+                throw new Error(`${name} doesn't have transition: ${from} -> ${to}`);
             }
 
             let handler: TransHandler = null;
@@ -329,18 +334,11 @@ export class HSM {
         this.parent.tell(name, state, data);
     }
 
-    set(name: string, state: State, data?: object): void;
-    set(state: State, data?: object): void;
-    set(nameOrState: string | State, stateOrData?: State | object, data?: object): void {
-        if (typeof stateOrData === 'string') {
-            this.tell(nameOrState, stateOrData, data);
-        }
-        else if (typeof stateOrData === 'object' || !stateOrData) {
-            this.ask(this.node.name, nameOrState, stateOrData);
-        }
+    set(state: State, data?: object): void {
+        this.ask(this.node.name, state, data);
     }
 
-    get(name: string): Wrapper {
+    wrap(name: string): Wrapper {
         return {
             name,
             enter: (state: State): EnterReq => {
@@ -403,13 +401,4 @@ export class HSM {
 
         return handler;
     }
-};
-
-export function s(name: string, states: State[], children: Node[] = []) : Node {
-    return new Node(name, states, children);
-}
-
-export function S(nameToStates: {[name: string]: State[]}, children: Node[] = []): Node {
-    let [name, states] = unpack(nameToStates);
-    return new Node(name, states, children);
 }

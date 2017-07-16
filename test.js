@@ -1,14 +1,15 @@
-let {HSM, s, S} = require('./royal.js');
+let {HSM} = require('./royal.js');
 
-let stateTree =
-    s('LIGHT', ['red', 'yellow', 'green'], [
-        s('CAR', ['forward', 'reverse', 'brake']),
-        s('PERSON', ['walk', 'idle'], [
-            s('DIR', ['left', 'right'])
+let hsm = HSM.build((s) => {
+    return (
+        s('LIGHT', ['red', 'yellow', 'green'], [
+            s('CAR', ['forward', 'reverse', 'brake']),
+            s('PERSON', ['walk', 'idle'], [
+                s('DIR', ['left', 'right'])
+            ])
         ])
-    ]);
-
-let hsm = HSM.create(stateTree);
+    );
+});
 
 hsm.configure({
     debug: true,
@@ -38,8 +39,8 @@ hsm.when('LIGHT', 'green', (hsm, data) => {
     hsm.when('PERSON', 'idle', (hsm, data) => {
     });
 
-    hsm.set('CAR', 'forward');
-    hsm.set('PERSON', 'idle');
+    hsm.tell('CAR', 'forward');
+    hsm.tell('PERSON', 'idle');
 
     setTimeout(() => hsm.set('yellow'), 2000);
 });
@@ -47,6 +48,6 @@ hsm.when('LIGHT', 'green', (hsm, data) => {
 hsm.when('LIGHT', {'*' : '*'}, (guard, data) => {
     console.log('----')
     guard.proceed();
-})
+});
 
-hsm.set('LIGHT', 'green');
+hsm.tell('LIGHT', 'green');
