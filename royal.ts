@@ -59,8 +59,6 @@ interface BetweenReq extends Request {
     to: State;
 }
 
-type NodeBuildFunc = (name: string, states: State[], children?: Node[]) => Node;
-
 interface HSMConfig {
     debug: boolean;
     requireHandler: boolean;
@@ -96,6 +94,10 @@ function unpack<T>(obj: {[key: string]: T}): [string, T] {
     let key = Object.keys(obj)[0];
     let value = obj[key];
     return [key, value];
+}
+
+export function s(name: string, states: State[], children?: Node[]): Node {
+    return new Node(name, states, children);
 }
 
 class Node {
@@ -160,17 +162,11 @@ export class HSM {
         }
     }
 
-    static create(node: Node | Node[]) {
-        let nodes = node instanceof Array ? node : [node];
+    static create(...nodes: Node[]) {
         let sentinel = new Node('__root', [], nodes);
         let hsm = new HSM(sentinel, null);
 
         return hsm;
-    }
-
-    static build(buildFunc: (nodeBuildFunc: NodeBuildFunc) => Node): HSM {
-        let tree = buildFunc(Node.create);
-        return HSM.create(tree);
     }
 
     private initChild(node: Node) {

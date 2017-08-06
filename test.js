@@ -1,15 +1,14 @@
-let {HSM} = require('./royal.js');
+let {HSM, s} = require('./royal.js');
 
-let hsm = HSM.build((s) => {
-    return (
-        s('LIGHT', ['red', 'yellow', 'green'], [
-            s('CAR', ['forward', 'reverse', 'brake']),
-            s('PERSON', ['walk', 'idle'], [
-                s('DIR', ['left', 'right'])
-            ])
+let tree =
+    s('LIGHT', ['red', 'yellow', 'green'], [
+        s('CAR', ['forward', 'reverse', 'brake']),
+        s('PERSON', ['walk', 'idle'], [
+            s('DIR', ['left', 'right'])
         ])
-    );
-});
+    ]);
+
+let hsm = HSM.create(tree);
 
 hsm.configure({
     debug: true,
