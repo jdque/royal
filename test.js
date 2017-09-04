@@ -16,16 +16,16 @@ hsm.configure({
 });
 
 hsm.when('LIGHT', 'red', (hsm, data) => {
-    setTimeout(() => hsm.set('green'), 2000);
+    hsm.set('green');
 });
 
 hsm.when('LIGHT', 'yellow', (hsm, data) => {
-    setTimeout(() => hsm.set('red'), 1000);
+    hsm.set('red');
 });
 
 hsm.when('LIGHT', 'green', (hsm, data) => {
     hsm.when('CAR', 'forward', (hsm, data) => {
-        setTimeout(() => hsm.set('brake'), 1000);
+        hsm.set('brake');
     });
 
     hsm.when('CAR', 'brake', (hsm, data) => {
@@ -41,7 +41,7 @@ hsm.when('LIGHT', 'green', (hsm, data) => {
     hsm.tell('CAR', 'forward');
     hsm.tell('PERSON', 'idle');
 
-    setTimeout(() => hsm.set('yellow'), 2000);
+    hsm.set('yellow');
 });
 
 hsm.when('LIGHT', {'*' : '*'}, (guard, data) => {

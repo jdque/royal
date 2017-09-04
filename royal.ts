@@ -1,6 +1,14 @@
 type State = string;
 type Transition = {[from: string]: /*to:*/ State};
 
+enum MachineState {
+    NONE,
+    ENTER,
+    EXIT,
+    GUARD,
+    UPDATE
+}
+
 interface EnterFunc<T> {
     (t: T, data?: object): ExitFunc<T> | boolean | void;
 }
@@ -139,9 +147,11 @@ export class HSM {
     private node: Node;
     private depth: number;
     private config: HSMConfig;
+    private state: MachineState;
     private nodeOf: {[name: string]: Node};
     private stateOf: {[name: string]: State};
     private handlerOf: {[name: string]: {[state: string]: StateHandler}};
+    private queueOf: {[name: string]: Array<{state: State, data?: object}>};
     private guardOf: {[name: string]: {[from: string]: {[to: string]: TransHandler}}};
 
     private constructor(node: Node, parent?: HSM) {
@@ -152,10 +162,12 @@ export class HSM {
             debug: false,
             requireHandler: false
         };
+        this.state = MachineState.NONE;
         this.nodeOf = {};
         this.stateOf = {};
         this.handlerOf = {};
         this.guardOf = {};
+        this.queueOf = {};
 
         for (let child of node.children) {
             this.initChild(child);
@@ -169,59 +181,22 @@ export class HSM {
         return hsm;
     }
 
+    configure(config: Partial<HSMConfig>) {
+        if ('debug' in config) {
+            this.config.debug = config.debug;
+        }
+        if ('requireHandler' in config) {
+            this.config.requireHandler = config.requireHandler;
+        }
+    }
+
     private initChild(node: Node) {
         let name = node.name;
         this.nodeOf[name] = node;
         this.stateOf[name] = null;
         this.handlerOf[name] = {};
         this.guardOf[name] = {};
-    }
-
-    private execTransition(target: Node, newState: State, data: any) {
-        let oldState = this.stateOf[target.name];
-        if (oldState) {
-            let oldHandler = this.handlerOf[target.name][oldState];
-            if (oldHandler && oldHandler.exit) {
-                oldHandler.exit();
-            }
-        }
-
-        if (this.config.debug) {
-            let indent = new Array(this.depth + 1).join('    ');
-            console.log(`${indent}${target.name} => ${newState}`);
-        }
-
-        this.stateOf[target.name] = newState;
-
-        let newHandler = this.handlerOf[target.name][newState];
-        if (!newHandler && this.config.requireHandler) {
-            throw new Error(`No handler registered for: ${target.name} => ${newState}`)
-        }
-        let enterRes = newHandler.enter(new HSM(target, this), data);
-        if (typeof enterRes === 'function' && !newHandler.exit) {
-            newHandler.exit = enterRes;
-        }
-    }
-
-    private execGuard(target: Node, from: State, to: State, data: any) {
-        let fromGuards = this.guardOf[target.name];
-        let toGuards = fromGuards[from] || fromGuards['*'];
-        let handler = toGuards[to] || toGuards['*'];
-        let guard = {
-            proceed: () => {
-                if (handler.exit) {
-                    handler.exit();
-                }
-                this.execTransition(target, to, data);
-            }
-        };
-        let enterRes = handler.enter(guard, data);
-        if (enterRes === true) {
-            guard.proceed();
-        }
-        else if (typeof enterRes === 'function' && !handler.exit) {
-            handler.exit = enterRes;
-        }
+        this.queueOf[name] = [];
     }
 
     private isGuarded(target: Node, from: State, to: State): boolean {
@@ -241,13 +216,113 @@ export class HSM {
         return true;
     }
 
-    configure(config: Partial<HSMConfig>) {
-        if ('debug' in config) {
-            this.config.debug = config.debug;
+    private execTransition(target: Node, newState: State, data: any) {
+        let oldState = this.stateOf[target.name];
+        if (oldState) {
+            let oldHandler = this.handlerOf[target.name][oldState];
+            if (oldHandler && oldHandler.exit) {
+                this.state = MachineState.EXIT;
+                oldHandler.exit();
+                this.state = MachineState.NONE;
+            }
         }
-        if ('requireHandler' in config) {
-            this.config.requireHandler = config.requireHandler;
+
+        if (this.config.debug) {
+            let indent = new Array(this.depth + 1).join('    ');
+            console.log(`${indent}${target.name} => ${newState}`);
         }
+
+        this.stateOf[target.name] = newState;
+
+        let newHandler = this.handlerOf[target.name][newState];
+        if (!newHandler && this.config.requireHandler) {
+            throw new Error(`No handler registered for: ${target.name} => ${newState}`)
+        }
+
+        this.state = MachineState.ENTER;
+        let enterRes = newHandler.enter(new HSM(target, this), data);
+        this.state = MachineState.NONE;
+
+        if (typeof enterRes === 'function' && !newHandler.exit) {
+            newHandler.exit = enterRes;
+        }
+    }
+
+    private execGuard(target: Node, from: State, to: State, data: any) {
+        let fromGuards = this.guardOf[target.name];
+        let toGuards = fromGuards[from] || fromGuards['*'];
+        let handler = toGuards[to] || toGuards['*'];
+        let guard = {
+            proceed: () => {
+                if (handler.exit) {
+                    this.state = MachineState.EXIT;
+                    handler.exit();
+                    this.state = MachineState.NONE;
+                }
+
+                let queue = this.queueOf[target.name];
+                if (queue.length > 0) {
+                    this.execTransition(target, to, data);
+                }
+                else {
+                    queue.push({state: to, data: data});
+                    this.run(target.name);
+                }
+            }
+        };
+
+        this.state = MachineState.ENTER;
+        let enterRes = handler.enter(guard, data);
+        this.state = MachineState.NONE;
+
+        if (enterRes === true) {
+            guard.proceed();
+        }
+        else if (typeof enterRes === 'function' && !handler.exit) {
+            handler.exit = enterRes;
+        }
+    }
+
+    private execState(name: string, state: State, data?: object): void {
+        let target = this.nodeOf[name];
+        if (!target) {
+            throw new Error(`Name doesn't exist in this context: ${name}`);
+        }
+        if (!target.hasState(state)) {
+            throw new Error(`${target.name} doesn't have state: ${state}`);
+        }
+
+        let curState = this.stateOf[target.name];
+        if (this.isGuarded(target, curState, state)) {
+            this.execGuard(target, curState, state, data);
+        }
+        else {
+            this.execTransition(target, state, data);
+        }
+    }
+
+    private run(name: string) {
+        let queue = this.queueOf[name];
+        while (queue.length > 0) {
+            let {state, data} = queue[0];
+            this.execState(name, state, data);
+            queue.shift();
+        }
+    }
+
+    tell(name: string, state: State, data?: object): void {
+        this.queueOf[name].push({state, data});
+        if (this.queueOf[name].length === 1 && this.state !== MachineState.UPDATE) {
+            this.run(name);
+        }
+    }
+
+    ask(name: string, state: State, data?: object): void {
+        this.parent.tell(name, state, data);
+    }
+
+    set(state: State, data?: object): void {
+        this.parent.tell(this.node.name, state, data);
     }
 
     when(name: string, state: State, handlerOrFunc: StateHandler | StateEnterFunc);
@@ -304,36 +379,6 @@ export class HSM {
         }
     }
 
-    tell(name: string, state: State, data?: object): void {
-        let target = this.nodeOf[name];
-        if (!target) {
-            throw new Error(`Name doesn't exist in this context: ${name}`);
-        }
-        if (!target.hasState(state)) {
-            throw new Error(`${target.name} doesn't have state: ${state}`);
-        }
-
-        let curState = this.stateOf[target.name];
-        if (this.isGuarded(target, curState, state)) {
-            this.execGuard(target, curState, state, data);
-        }
-        else {
-            this.execTransition(target, state, data);
-        }
-    }
-
-    ask(name: string, state: State, data?: object): void {
-        if (!this.parent) {
-            throw new Error("Current context has no parent");
-        }
-
-        this.parent.tell(name, state, data);
-    }
-
-    set(state: State, data?: object): void {
-        this.ask(this.node.name, state, data);
-    }
-
     wrap(name: string): Wrapper {
         return {
             name,
@@ -375,26 +420,14 @@ export class HSM {
             if (!handler || !handler.update) {
                 continue;
             }
-            this.handlerOf[name][state].update(this, delta);
-        }
-    }
 
-    getHandlers(): StateHandler[] {
-        let handlers = [];
-        for (let name in this.stateOf) {
-            let state = this.stateOf[name];
-            if (state != null) {
-                handlers.push(this.handlerOf[name][state]);
+            this.state = MachineState.UPDATE;
+            this.handlerOf[name][state].update(this, delta);
+            this.state = MachineState.NONE;
+
+            if (this.queueOf[name].length > 0) {
+                this.run(name);
             }
         }
-
-        return handlers;
-    }
-
-    getHandler(name: string): StateHandler {
-        let state = this.stateOf[name];
-        let handler = this.handlerOf[name][state];
-
-        return handler;
     }
 }
