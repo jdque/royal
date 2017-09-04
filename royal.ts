@@ -266,7 +266,9 @@ export class HSM {
                 }
                 else {
                     queue.push({state: to, data: data});
-                    this.run(target.name);
+                    this.execTransition(target, to, data);
+                    queue.shift();
+                    this.run(target);
                 }
             }
         };
@@ -301,19 +303,32 @@ export class HSM {
         }
     }
 
-    private run(name: string) {
-        let queue = this.queueOf[name];
+    private run(target: Node): void {
+        let queue = this.queueOf[target.name];
         while (queue.length > 0) {
             let {state, data} = queue[0];
-            this.execState(name, state, data);
+            this.execState(target.name, state, data);
             queue.shift();
         }
     }
 
+    private schedule(target: Node, state: State, data?: object): void {
+        let queue = this.queueOf[target.name];
+        if (queue.length <= 1) {
+            queue.push({state, data});
+        }
+        else if (queue.length === 2) {
+            queue[1] = {state, data};
+        }
+    }
+
     tell(name: string, state: State, data?: object): void {
-        this.queueOf[name].push({state, data});
-        if (this.queueOf[name].length === 1 && this.state !== MachineState.UPDATE) {
-            this.run(name);
+        let target = this.nodeOf[name];
+        this.schedule(target, state, data);
+
+        let queue = this.queueOf[name];
+        if (queue.length === 1 && this.state !== MachineState.UPDATE) {
+            this.run(target);
         }
     }
 
@@ -426,7 +441,7 @@ export class HSM {
             this.state = MachineState.NONE;
 
             if (this.queueOf[name].length > 0) {
-                this.run(name);
+                this.run(this.nodeOf[name]);
             }
         }
     }
