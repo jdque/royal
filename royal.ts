@@ -72,6 +72,10 @@ interface HSMConfig {
     requireHandler: boolean;
 }
 
+function isFunction(obj: any): obj is ((...args: any[]) => any) {
+    return typeof obj === 'function';
+}
+
 function isEnterReq(req: Request): req is EnterReq {
     return req.__type === 'enter';
 }
@@ -243,7 +247,7 @@ export class HSM {
         let enterRes = newHandler.enter(new HSM(target, this), data);
         this.state = MachineState.NONE;
 
-        if (typeof enterRes === 'function' && !newHandler.exit) {
+        if (isFunction(enterRes) && !newHandler.exit) {
             newHandler.exit = enterRes;
         }
     }
@@ -280,7 +284,7 @@ export class HSM {
         if (enterRes === true) {
             guard.proceed();
         }
-        else if (typeof enterRes === 'function' && !handler.exit) {
+        else if (isFunction(enterRes) && !handler.exit) {
             handler.exit = enterRes;
         }
     }
@@ -358,7 +362,7 @@ export class HSM {
             if (isHandler(handlerOrFunc)) {
                 handler = <TransHandler>handlerOrFunc;
             }
-            else if (typeof handlerOrFunc === 'function') {
+            else if (isFunction(handlerOrFunc)) {
                 handler = {
                     enter: <TransEnterFunc>handlerOrFunc,
                     update: null,
@@ -382,7 +386,7 @@ export class HSM {
             if (isHandler(handlerOrFunc)) {
                 handler = <StateHandler>handlerOrFunc;
             }
-            else if (typeof handlerOrFunc === 'function') {
+            else if (isFunction(handlerOrFunc)) {
                 handler = {
                     enter: <StateEnterFunc>handlerOrFunc,
                     update: null,
