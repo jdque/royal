@@ -10,7 +10,7 @@ enum MachineState {
 }
 
 interface EnterFunc<T> {
-    (t: T, data?: object): ExitFunc<T> | boolean | void;
+    (t: T, data?: object): Partial<Handler<T>> | ExitFunc<T> | boolean | void;
 }
 
 interface UpdateFunc<T> {
@@ -89,7 +89,17 @@ function isBetweenReq(req: Request): req is BetweenReq {
 }
 
 function isHandler<T>(obj: any): obj is Handler<T> {
-   return 'enter' in obj;
+   if (obj == null) {
+       return false;
+   }
+   return 'enter' in obj && 'update' in obj && 'exit' in obj;
+}
+
+function isPartialHandler<T>(obj: any): obj is Partial<Handler<T>> {
+    if (obj == null) {
+        return false;
+    }
+    return 'enter' in obj || 'update' in obj || 'exit' in obj;
 }
 
 function isTransition(transition: any): transition is Transition {
@@ -249,7 +259,11 @@ export class HSM {
         let enterRes = newHandler.enter(new HSM(target, this), data);
         this.state = MachineState.NONE;
 
-        if (isFunction(enterRes) && !newHandler.exit) {
+        if (isPartialHandler(enterRes)) {
+            newHandler.update = enterRes.update || null;
+            newHandler.exit = enterRes.exit || null;
+        }
+        else if (isFunction(enterRes)) {
             newHandler.exit = enterRes;
         }
     }
@@ -286,7 +300,11 @@ export class HSM {
         if (enterRes === true) {
             guard.proceed();
         }
-        else if (isFunction(enterRes) && !handler.exit) {
+        else if (isPartialHandler(enterRes)) {
+            handler.update = enterRes.update || null;
+            handler.exit = enterRes.exit || null;
+        }
+        else if (isFunction(enterRes)) {
             handler.exit = enterRes;
         }
     }
@@ -346,8 +364,8 @@ export class HSM {
         this.parent.tell(this.node.name, state, data);
     }
 
-    when(name: string, state: State, handlerOrFunc: StateHandler | StateEnterFunc);
-    when(name: string, transition: Transition, handlerOrFunc: TransHandler | TransEnterFunc);
+    when(name: string, state: State, handlerOrFunc: Partial<StateHandler> | StateEnterFunc);
+    when(name: string, transition: Transition, handlerOrFunc: Partial<TransHandler> | TransEnterFunc);
     when(name: string, stateOrTransition: any, handlerOrFunc: any): HSM {
         let target = this.nodeOf[name];
         if (!target) {
@@ -361,8 +379,12 @@ export class HSM {
             }
 
             let handler: TransHandler = null;
-            if (isHandler(handlerOrFunc)) {
-                handler = <TransHandler>handlerOrFunc;
+            if (isPartialHandler(handlerOrFunc)) {
+                handler = {
+                    enter: handlerOrFunc.enter,
+                    update: handlerOrFunc.update,
+                    exit: handlerOrFunc.exit,
+                };
             }
             else if (isFunction(handlerOrFunc)) {
                 handler = {
@@ -385,8 +407,12 @@ export class HSM {
             }
 
             let handler: StateHandler = null;
-            if (isHandler(handlerOrFunc)) {
-                handler = <StateHandler>handlerOrFunc;
+            if (isPartialHandler(handlerOrFunc)) {
+                handler = {
+                    enter: handlerOrFunc.enter,
+                    update: handlerOrFunc.update,
+                    exit: handlerOrFunc.exit,
+                };
             }
             else if (isFunction(handlerOrFunc)) {
                 handler = {
@@ -463,11 +489,9 @@ interface FSMConfig {
 export class FSM {
     private static ROOT = "FSM";
     private hsm: HSM;
-    private wrapper: Wrapper;
 
     private constructor(states: State[]) {
         this.hsm = HSM.create(s(FSM.ROOT, states, []));
-        this.wrapper = this.hsm.wrap(FSM.ROOT);
     }
 
     static create(states: State[]): FSM {
@@ -491,8 +515,8 @@ export class FSM {
         this.hsm.tell(FSM.ROOT, state, data);
     }
 
-    when(state: State, handlerOrFunc: StateHandler | StateEnterFunc);
-    when(transition: Transition, handlerOrFunc: TransHandler | TransEnterFunc);
+    when(state: State, handlerOrFunc: Partial<StateHandler> | StateEnterFunc);
+    when(transition: Transition, handlerOrFunc: Partial<TransHandler> | TransEnterFunc);
     when(stateOrTransition: any, handlerOrFunc: any): FSM {
         this.hsm.when(FSM.ROOT, stateOrTransition, handlerOrFunc);
         return this;
