@@ -155,8 +155,8 @@ export class HSM {
     private nodeOf: {[name: string]: Node};
     private stateOf: {[name: string]: State};
     private handlerOf: {[name: string]: {[state: string]: StateHandler}};
-    private queueOf: {[name: string]: Array<{state: State, data?: object}>};
     private guardOf: {[name: string]: {[from: string]: {[to: string]: TransHandler}}};
+    private queueOf: {[name: string]: Array<{state: State, data?: object}>};
 
     private constructor(node: Node, parent?: HSM) {
         this.parent = parent;
@@ -178,20 +178,22 @@ export class HSM {
         }
     }
 
-    static create(...nodes: Node[]) {
+    static create(...nodes: Node[]): HSM {
         let sentinel = new Node('__root', [], nodes);
         let hsm = new HSM(sentinel, null);
 
         return hsm;
     }
 
-    configure(config: Partial<HSMConfig>) {
+    configure(config: Partial<HSMConfig>): HSM {
         if ('debug' in config) {
             this.config.debug = config.debug;
         }
         if ('requireHandler' in config) {
             this.config.requireHandler = config.requireHandler;
         }
+
+        return this;
     }
 
     private initChild(node: Node) {
@@ -346,7 +348,7 @@ export class HSM {
 
     when(name: string, state: State, handlerOrFunc: StateHandler | StateEnterFunc);
     when(name: string, transition: Transition, handlerOrFunc: TransHandler | TransEnterFunc);
-    when(name: string, stateOrTransition: any, handlerOrFunc: any): void {
+    when(name: string, stateOrTransition: any, handlerOrFunc: any): HSM {
         let target = this.nodeOf[name];
         if (!target) {
             throw new Error(`Name doesn't exist in this context: ${name}`);
@@ -396,6 +398,8 @@ export class HSM {
 
             this.handlerOf[target.name][state] = handler;
         }
+
+        return this;
     }
 
     wrap(name: string): Wrapper {
@@ -448,5 +452,53 @@ export class HSM {
                 this.run(this.nodeOf[name]);
             }
         }
+    }
+}
+
+interface FSMConfig {
+    debug: boolean;
+    requireHandler: boolean;
+}
+
+export class FSM {
+    private static ROOT = "FSM";
+    private hsm: HSM;
+    private wrapper: Wrapper;
+
+    private constructor(states: State[]) {
+        this.hsm = HSM.create(s(FSM.ROOT, states, []));
+        this.wrapper = this.hsm.wrap(FSM.ROOT);
+    }
+
+    static create(states: State[]): FSM {
+        return new FSM(states);
+    }
+
+    configure(config: Partial<FSMConfig>): FSM {
+        let hsmConfig: Partial<HSMConfig> = {};
+        if ('debug' in config) {
+            hsmConfig.debug = config.debug;
+        }
+        if ('requireHandler' in config) {
+            hsmConfig.requireHandler = config.requireHandler;
+        }
+        this.hsm.configure(hsmConfig);
+
+        return this;
+    }
+
+    set(state: State, data?: object): void {
+        this.hsm.tell(FSM.ROOT, state, data);
+    }
+
+    when(state: State, handlerOrFunc: StateHandler | StateEnterFunc);
+    when(transition: Transition, handlerOrFunc: TransHandler | TransEnterFunc);
+    when(stateOrTransition: any, handlerOrFunc: any): FSM {
+        this.hsm.when(FSM.ROOT, stateOrTransition, handlerOrFunc);
+        return this;
+    }
+
+    update(delta: number): void {
+        this.hsm.update(delta);
     }
 }
