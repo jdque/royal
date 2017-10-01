@@ -72,6 +72,10 @@ interface HSMConfig {
     requireHandler: boolean;
 }
 
+function isArray(obj: any): obj is Array<any> {
+    return Array.isArray(obj);
+}
+
 function isFunction(obj: any): obj is ((...args: any[]) => any) {
     return typeof obj === 'function';
 }
@@ -494,8 +498,18 @@ export class FSM {
         this.hsm = HSM.create(s(FSM.ROOT, states, []));
     }
 
-    static create(states: State[]): FSM {
-        return new FSM(states);
+    static create(states: State[] | {[state: string]: Partial<StateHandler> | StateEnterFunc}): FSM {
+        if (isArray(states)) {
+            return new FSM(states);
+        }
+        else {
+            let keyStates = Object.keys(states);
+            let fsm = new FSM(keyStates);
+            for (let state of keyStates) {
+                fsm.when(state, states[state]);
+            }
+            return fsm;
+        }
     }
 
     configure(config: Partial<FSMConfig>): FSM {
