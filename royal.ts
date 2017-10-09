@@ -9,6 +9,21 @@ enum MachineState {
     UPDATE
 }
 
+interface TransCommand {
+    source: Node;
+    target: Node;
+    newState: State;
+    data?: object;
+}
+
+interface GuardCommand {
+    source: Node;
+    target: Node;
+    fromState: State;
+    toState: State;
+    data?: object;
+}
+
 interface EnterFunc<T> {
     (t: T, data?: object): Partial<Handler<T>> | ExitFunc<T> | boolean | void;
 }
@@ -27,15 +42,18 @@ interface Handler<T> {
     exit: ExitFunc<T>;
 }
 
+interface Guard {
+    from: string;
+    cancel: () => void;
+    proceed: () => void;
+}
+
 type StateEnterFunc = EnterFunc<HSM>;
 type StateExitFunc = ExitFunc<HSM>;
 type StateHandler = Handler<HSM>;
 type TransEnterFunc = EnterFunc<Guard>;
+type TransExitFunc = ExitFunc<Guard>;
 type TransHandler = Handler<Guard>;
-
-interface Guard {
-    proceed: () => void;
-}
 
 interface Wrapper {
     name: string;
@@ -170,7 +188,7 @@ export class HSM {
     private stateOf: {[name: string]: State};
     private handlerOf: {[name: string]: {[state: string]: StateHandler}};
     private guardOf: {[name: string]: {[from: string]: {[to: string]: TransHandler}}};
-    private queueOf: {[name: string]: Array<{state: State, data?: object}>};
+    private queueOf: {[name: string]: Array<TransCommand>};
 
     private constructor(node: Node, parent?: HSM) {
         this.parent = parent;
@@ -236,7 +254,9 @@ export class HSM {
         return true;
     }
 
-    private execTransition(target: Node, newState: State, data: any) {
+    private execTransition(transCommand: TransCommand) {
+        let {source, target, newState, data} = transCommand;
+
         let oldState = this.stateOf[target.name];
         if (oldState) {
             let oldHandler = this.handlerOf[target.name][oldState];
@@ -272,11 +292,20 @@ export class HSM {
         }
     }
 
-    private execGuard(target: Node, from: State, to: State, data: any) {
+    private execGuard(guardCommand: GuardCommand) {
+        let {source, target, fromState, toState, data} = guardCommand;
+
         let fromGuards = this.guardOf[target.name];
-        let toGuards = fromGuards[from] || fromGuards['*'];
-        let handler = toGuards[to] || toGuards['*'];
-        let guard = {
+        let toGuards = fromGuards[fromState] || fromGuards['*'];
+        let handler = toGuards[toState] || toGuards['*'];
+        let fromName =
+            source === target    ? '__self__'   :
+            source === this.node ? '__parent__' : source.name;
+        let guard: Guard = {
+            from: fromName,
+            cancel: () => {
+                //TODO
+            },
             proceed: () => {
                 if (handler.exit) {
                     this.state = MachineState.EXIT;
@@ -284,13 +313,20 @@ export class HSM {
                     this.state = MachineState.NONE;
                 }
 
+                let transCommand = {
+                    source: source,
+                    target: target,
+                    newState: toState,
+                    data: data
+                };
+
                 let queue = this.queueOf[target.name];
                 if (queue.length > 0) {
-                    this.execTransition(target, to, data);
+                    this.execTransition(transCommand);
                 }
                 else {
-                    queue.push({state: to, data: data});
-                    this.execTransition(target, to, data);
+                    queue.push(transCommand);
+                    this.execTransition(transCommand);
                     queue.shift();
                     this.run(target);
                 }
@@ -313,46 +349,57 @@ export class HSM {
         }
     }
 
-    private execState(name: string, state: State, data?: object): void {
-        let target = this.nodeOf[name];
+    private execState(transCommand: TransCommand): void {
+        let {source, target, newState, data} = transCommand;
+
         if (!target) {
             throw new Error(`Name doesn't exist in this context: ${name}`);
         }
-        if (!target.hasState(state)) {
-            throw new Error(`${target.name} doesn't have state: ${state}`);
+        if (!target.hasState(newState)) {
+            throw new Error(`${target.name} doesn't have state: ${newState}`);
         }
 
         let curState = this.stateOf[target.name];
-        if (this.isGuarded(target, curState, state)) {
-            this.execGuard(target, curState, state, data);
+        if (this.isGuarded(target, curState, newState)) {
+            let guardCommand: GuardCommand = {
+                source: source,
+                target: target,
+                fromState: curState,
+                toState: newState,
+                data: data
+            };
+            this.execGuard(guardCommand);
         }
         else {
-            this.execTransition(target, state, data);
+            this.execTransition(transCommand);
         }
     }
 
     private run(target: Node): void {
         let queue = this.queueOf[target.name];
         while (queue.length > 0) {
-            let {state, data} = queue[0];
-            this.execState(target.name, state, data);
+            let command = queue[0];
+            this.execState(command);
             queue.shift();
         }
     }
 
-    private schedule(target: Node, state: State, data?: object): void {
+    private schedule(source: Node, target: Node, newState: State, data?: object): void {
+        let transCommand: TransCommand = {source, target, newState, data};
+
         let queue = this.queueOf[target.name];
         if (queue.length <= 1) {
-            queue.push({state, data});
+            queue.push(transCommand);
         }
         else if (queue.length === 2) {
-            queue[1] = {state, data};
+            queue[1] = transCommand;
         }
     }
 
     tell(name: string, state: State, data?: object): void {
+        let source = this.node;
         let target = this.nodeOf[name];
-        this.schedule(target, state, data);
+        this.schedule(source, target, state, data);
 
         let queue = this.queueOf[name];
         if (queue.length === 1 && this.state !== MachineState.UPDATE) {
@@ -361,11 +408,25 @@ export class HSM {
     }
 
     ask(name: string, state: State, data?: object): void {
-        this.parent.tell(name, state, data);
+        let source = this.node;
+        let target = this.parent.nodeOf[name];
+        this.parent.schedule(source, target, state, data);
+
+        let queue = this.parent.queueOf[target.name];
+        if (queue.length === 1 && this.parent.state !== MachineState.UPDATE) {
+            this.parent.run(target);
+        }
     }
 
     set(state: State, data?: object): void {
-        this.parent.tell(this.node.name, state, data);
+        let source = this.node;
+        let target = this.node;
+        this.parent.schedule(source, target, state, data);
+
+        let queue = this.parent.queueOf[target.name];
+        if (queue.length === 1 && this.parent.state !== MachineState.UPDATE) {
+            this.parent.run(target);
+        }
     }
 
     when(name: string, state: State, handlerOrFunc: Partial<StateHandler> | StateEnterFunc);
