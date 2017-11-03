@@ -140,23 +140,45 @@ function unpack<T>(obj: {[key: string]: T}): [string, T] {
     return [key, value];
 }
 
-export function s(name: string, states: State[], children?: Node[]): Node {
-    return new Node(name, states, children);
+function extend<T>(base: {[key: string]: T}, ...objs: Array<{[key: string]: T}>): {[key: string]: T} {
+    for (let obj of objs) {
+        for (let key in obj) {
+            base[key] = obj[key];
+        }
+    }
+    return base;
 }
 
 class Node {
     readonly name: string;
     readonly states: State[];
     readonly children: Node[];
-    readonly childMap: {[name: string]: Node};
+    readonly childMap: {[state: string]: {[name: string]: Node}};
 
-    constructor(name: string, states: State[], children: Node[] = []) {
+    constructor(name: string, states: Array<State>, children: Array<Node|Restrictor> = []) {
         this.name = name;
         this.states = states;
-        this.children = children;
+        this.children = [];
         this.childMap = {};
-        for (let child of this.children) {
-            this.childMap[child.name] = child;
+
+        for (let state of this.states) {
+            this.childMap[state] = {};
+        }
+        this.childMap['*'] = {};
+
+        for (let child of children) {
+            if (child instanceof Restrictor) {
+                for (let grandChild of child.children) {
+                    for (let state of child.states) {
+                        this.childMap[state][grandChild.name] = grandChild;
+                        this.children.push(grandChild);
+                    }
+                }
+            }
+            else {
+                this.childMap['*'][child.name] = child;
+                this.children.push(child);
+            }
         }
     }
 
@@ -164,55 +186,100 @@ class Node {
         return new Node(name, states, children);
     }
 
-    getChild(name: string): Node {
-        return this.childMap[name];
+
+    hasChild(name: string, state: State): boolean {
+        if (!this.hasState(state)) {
+            return false;
+        }
+        return this.childMap[state][name] || this.childMap['*'][name] ? true : false;
     }
 
     hasState(state: State): boolean {
-        return this.states.indexOf(state) >= 0;
+        return this.states.indexOf(state) >= 0 || state === '*';
     }
 
     hasTransition(from: State, to: State): boolean {
         return (this.hasState(from) || from === '*') &&
                (this.hasState(to) || to === '*');
     }
+
+    getChild(name: string, state: State): Node {
+        if (!this.hasChild(name, state)) {
+            return null;
+        }
+        return this.childMap[state][name] || this.childMap['*'][name];
+    }
+
+    getChildren(state: State): Node[] {
+        if (!this.hasState(state)) {
+            return null;
+        }
+        let childMap = extend({}, this.childMap['*'], this.childMap[state]);
+        let children = Object.keys(childMap).map(key => childMap[key]);
+        return children;
+    }
+}
+
+class Restrictor {
+    readonly type: string = 'Restrictor';
+    readonly states: State[];
+    readonly children: Node[];
+
+    constructor(states: State|State[], children: Node[] = []) {
+        if (!isArray(states)) {
+            states = [states];
+        }
+        this.states = states;
+        this.children = children;
+    }
+}
+
+export function s(name: string, states: Array<State>, children?: Array<Node|Restrictor>): Node {
+    return new Node(name, states, children);
+}
+
+export function only(states: State|Array<State>, children?: Array<Node>): Restrictor {
+    return new Restrictor(states, children);
 }
 
 export class HSM {
     private parent: HSM;
     private node: Node;
+    private state: State;
     private depth: number;
     private config: HSMConfig;
-    private state: MachineState;
+    private machineState: MachineState;
     private nodeOf: {[name: string]: Node};
     private stateOf: {[name: string]: State};
     private handlerOf: {[name: string]: {[state: string]: StateHandler}};
     private guardOf: {[name: string]: {[from: string]: {[to: string]: TransHandler}}};
     private queueOf: {[name: string]: Array<TransCommand>};
 
-    private constructor(node: Node, parent?: HSM) {
+    private constructor(node: Node, parent: HSM = null, state: State = '*') {
         this.parent = parent;
         this.node = node;
+        this.state = state;
         this.depth = parent ? parent.depth + 1 : 0;
         this.config = parent ? parent.config : {
             debug: false,
             requireHandler: false
         };
-        this.state = MachineState.NONE;
+        this.machineState = MachineState.NONE;
         this.nodeOf = {};
         this.stateOf = {};
         this.handlerOf = {};
         this.guardOf = {};
         this.queueOf = {};
 
-        for (let child of node.children) {
+        let children = this.node.getChildren(this.state);
+        for (let child of children) {
             this.initChild(child);
         }
     }
 
     static create(...nodes: Node[]): HSM {
         let sentinel = new Node('__root', [], nodes);
-        let hsm = new HSM(sentinel, null);
+        let hsm = new HSM(sentinel);
 
         return hsm;
     }
@@ -261,9 +328,9 @@ export class HSM {
         if (oldState) {
             let oldHandler = this.handlerOf[target.name][oldState];
             if (oldHandler && oldHandler.exit) {
-                this.state = MachineState.EXIT;
+                this.machineState = MachineState.EXIT;
                 oldHandler.exit();
-                this.state = MachineState.NONE;
+                this.machineState = MachineState.NONE;
             }
         }
 
@@ -279,9 +346,9 @@ export class HSM {
             throw new Error(`No handler registered for: ${target.name} => ${newState}`)
         }
 
-        this.state = MachineState.ENTER;
-        let enterRes = newHandler.enter(new HSM(target, this), data);
-        this.state = MachineState.NONE;
+        this.machineState = MachineState.ENTER;
+        let enterRes = newHandler.enter(new HSM(target, this, newState), data);
+        this.machineState = MachineState.NONE;
 
         if (isPartialHandler(enterRes)) {
             newHandler.update = enterRes.update || null;
@@ -308,9 +375,9 @@ export class HSM {
             },
             proceed: () => {
                 if (handler.exit) {
-                    this.state = MachineState.EXIT;
+                    this.machineState = MachineState.EXIT;
                     handler.exit();
-                    this.state = MachineState.NONE;
+                    this.machineState = MachineState.NONE;
                 }
 
                 let transCommand = {
@@ -333,9 +400,9 @@ export class HSM {
             }
         };
 
-        this.state = MachineState.ENTER;
+        this.machineState = MachineState.ENTER;
         let enterRes = handler.enter(guard, data);
-        this.state = MachineState.NONE;
+        this.machineState = MachineState.NONE;
 
         if (enterRes === true) {
             guard.proceed();
@@ -397,23 +464,31 @@ export class HSM {
     }
 
     tell(name: string, state: State, data?: object): void {
+        if (!this.node.hasChild(name, this.state)) {
+            throw new Error(`Name doesn't exist in state ${this.state}: ${name}`);
+        }
+
         let source = this.node;
         let target = this.nodeOf[name];
         this.schedule(source, target, state, data);
 
         let queue = this.queueOf[name];
-        if (queue.length === 1 && this.state !== MachineState.UPDATE) {
+        if (queue.length === 1 && this.machineState !== MachineState.UPDATE) {
             this.run(target);
         }
     }
 
     ask(name: string, state: State, data?: object): void {
+        if (!this.parent.node.hasChild(name, this.parent.state)) {
+            throw new Error(`Name doesn't exist in state ${state}: ${name}`);
+        }
+
         let source = this.node;
         let target = this.parent.nodeOf[name];
         this.parent.schedule(source, target, state, data);
 
         let queue = this.parent.queueOf[target.name];
-        if (queue.length === 1 && this.parent.state !== MachineState.UPDATE) {
+        if (queue.length === 1 && this.parent.machineState !== MachineState.UPDATE) {
             this.parent.run(target);
         }
     }
@@ -424,7 +499,7 @@ export class HSM {
         this.parent.schedule(source, target, state, data);
 
         let queue = this.parent.queueOf[target.name];
-        if (queue.length === 1 && this.parent.state !== MachineState.UPDATE) {
+        if (queue.length === 1 && this.parent.machineState !== MachineState.UPDATE) {
             this.parent.run(target);
         }
     }
@@ -535,9 +610,9 @@ export class HSM {
                 continue;
             }
 
-            this.state = MachineState.UPDATE;
+            this.machineState = MachineState.UPDATE;
             this.handlerOf[name][state].update(this, delta);
-            this.state = MachineState.NONE;
+            this.machineState = MachineState.NONE;
 
             if (this.queueOf[name].length > 0) {
                 this.run(this.nodeOf[name]);
