@@ -12,13 +12,6 @@ enum MachineState {
 interface TransCommand {
     source: Node;
     target: Node;
-    newState: State;
-    data?: object;
-}
-
-interface GuardCommand {
-    source: Node;
-    target: Node;
     fromState: State;
     toState: State;
     data?: object;
@@ -83,11 +76,6 @@ interface BetweenReq extends Request {
     name: string;
     from: State;
     to: State;
-}
-
-interface HSMConfig {
-    debug: boolean;
-    requireHandler: boolean;
 }
 
 function isArray(obj: any): obj is Array<any> {
@@ -170,12 +158,18 @@ class Node {
             if (child instanceof Restrictor) {
                 for (let grandChild of child.children) {
                     for (let state of child.states) {
+                        if (this.childMap[state][grandChild.name]) {
+                            throw new Error(`Duplicate node: ${grandChild.name}`);
+                        }
                         this.childMap[state][grandChild.name] = grandChild;
                         this.children.push(grandChild);
                     }
                 }
             }
             else {
+                if (this.childMap['*'][child.name]) {
+                    throw new Error(`Duplicate node: ${child.name}`);
+                }
                 this.childMap['*'][child.name] = child;
                 this.children.push(child);
             }
@@ -242,6 +236,11 @@ export function only(states: State|Array<State>, children?: Array<Node>): Restri
     return new Restrictor(states, children);
 }
 
+export interface HSMConfig {
+    debug: boolean;
+    requireHandler: boolean;
+}
+
 export class HSM {
     private parent: HSM;
     private node: Node;
@@ -295,7 +294,7 @@ export class HSM {
         return this;
     }
 
-    private initChild(node: Node) {
+    private initChild(node: Node): void {
         let name = node.name;
         this.nodeOf[name] = node;
         this.stateOf[name] = null;
@@ -321,12 +320,11 @@ export class HSM {
         return true;
     }
 
-    private execTransition(transCommand: TransCommand) {
-        let {source, target, newState, data} = transCommand;
+    private execTransition(transCommand: TransCommand): void {
+        let {source, target, fromState, toState, data} = transCommand;
 
-        let oldState = this.stateOf[target.name];
-        if (oldState) {
-            let oldHandler = this.handlerOf[target.name][oldState];
+        if (fromState) {
+            let oldHandler = this.handlerOf[target.name][fromState];
             if (oldHandler && oldHandler.exit) {
                 this.machineState = MachineState.EXIT;
                 oldHandler.exit();
@@ -336,18 +334,18 @@ export class HSM {
 
         if (this.config.debug) {
             let indent = new Array(this.depth + 1).join('    ');
-            console.log(`${indent}${target.name} => ${newState}`);
+            console.log(`${indent}${target.name} => ${toState}`);
         }
 
-        this.stateOf[target.name] = newState;
+        this.stateOf[target.name] = toState;
 
-        let newHandler = this.handlerOf[target.name][newState];
+        let newHandler = this.handlerOf[target.name][toState];
         if (!newHandler && this.config.requireHandler) {
-            throw new Error(`No handler registered for: ${target.name} => ${newState}`)
+            throw new Error(`No handler registered for: ${target.name} => ${toState}`)
         }
 
         this.machineState = MachineState.ENTER;
-        let enterRes = newHandler.enter(new HSM(target, this, newState), data);
+        let enterRes = newHandler.enter(new HSM(target, this, toState), data);
         this.machineState = MachineState.NONE;
 
         if (isPartialHandler(enterRes)) {
@@ -359,8 +357,8 @@ export class HSM {
         }
     }
 
-    private execGuard(guardCommand: GuardCommand) {
-        let {source, target, fromState, toState, data} = guardCommand;
+    private execGuard(transCommand: TransCommand): void {
+        let {source, target, fromState, toState, data} = transCommand;
 
         let fromGuards = this.guardOf[target.name];
         let toGuards = fromGuards[fromState] || fromGuards['*'];
@@ -379,13 +377,6 @@ export class HSM {
                     handler.exit();
                     this.machineState = MachineState.NONE;
                 }
-
-                let transCommand = {
-                    source: source,
-                    target: target,
-                    newState: toState,
-                    data: data
-                };
 
                 let queue = this.queueOf[target.name];
                 if (queue.length > 0) {
@@ -417,25 +408,14 @@ export class HSM {
     }
 
     private execState(transCommand: TransCommand): void {
-        let {source, target, newState, data} = transCommand;
+        let {source, target, fromState, toState, data} = transCommand;
 
-        if (!target) {
-            throw new Error(`Name doesn't exist in this context: ${name}`);
-        }
-        if (!target.hasState(newState)) {
-            throw new Error(`${target.name} doesn't have state: ${newState}`);
+        if (this.stateOf[target.name] !== fromState) {
+            throw new Error('State of ${target.name} is inconsistent');
         }
 
-        let curState = this.stateOf[target.name];
-        if (this.isGuarded(target, curState, newState)) {
-            let guardCommand: GuardCommand = {
-                source: source,
-                target: target,
-                fromState: curState,
-                toState: newState,
-                data: data
-            };
-            this.execGuard(guardCommand);
+        if (this.isGuarded(target, fromState, toState)) {
+            this.execGuard(transCommand);
         }
         else {
             this.execTransition(transCommand);
@@ -451,8 +431,15 @@ export class HSM {
         }
     }
 
-    private schedule(source: Node, target: Node, newState: State, data?: object): void {
-        let transCommand: TransCommand = {source, target, newState, data};
+    private schedule(source: Node, target: Node, fromState: State, toState: State, data?: object): void {
+        if (!target) {
+            throw new Error(`Name doesn't exist in state ${this.state}: ${target.name}`);
+        }
+        if (!target.hasState(toState)) {
+            throw new Error(`${target.name} doesn't have state: ${toState}`);
+        }
+
+        let transCommand: TransCommand = {source, target, fromState, toState, data};
 
         let queue = this.queueOf[target.name];
         if (queue.length <= 1) {
@@ -461,51 +448,41 @@ export class HSM {
         else if (queue.length === 2) {
             queue[1] = transCommand;
         }
-    }
 
-    tell(name: string, state: State, data?: object): void {
-        if (!this.node.hasChild(name, this.state)) {
-            throw new Error(`Name doesn't exist in state ${this.state}: ${name}`);
-        }
-
-        let source = this.node;
-        let target = this.nodeOf[name];
-        this.schedule(source, target, state, data);
-
-        let queue = this.queueOf[name];
         if (queue.length === 1 && this.machineState !== MachineState.UPDATE) {
             this.run(target);
         }
     }
 
-    ask(name: string, state: State, data?: object): void {
-        if (!this.parent.node.hasChild(name, this.parent.state)) {
-            throw new Error(`Name doesn't exist in state ${state}: ${name}`);
-        }
+    tell(name: string, state: State, data?: object): void {
+        let source = this.node;
+        let target = this.nodeOf[name];
+        let fromState = this.stateOf[name];
+        let toState = state;
 
+        this.schedule(source, target, fromState, toState, data);
+    }
+
+    ask(name: string, state: State, data?: object): void {
         let source = this.node;
         let target = this.parent.nodeOf[name];
-        this.parent.schedule(source, target, state, data);
+        let fromState = this.parent.stateOf[name];
+        let toState = state;
 
-        let queue = this.parent.queueOf[target.name];
-        if (queue.length === 1 && this.parent.machineState !== MachineState.UPDATE) {
-            this.parent.run(target);
-        }
+        this.parent.schedule(source, target, fromState, toState, data);
     }
 
     set(state: State, data?: object): void {
         let source = this.node;
         let target = this.node;
-        this.parent.schedule(source, target, state, data);
+        let fromState = this.parent.stateOf[this.node.name];
+        let toState = state;
 
-        let queue = this.parent.queueOf[target.name];
-        if (queue.length === 1 && this.parent.machineState !== MachineState.UPDATE) {
-            this.parent.run(target);
-        }
+        this.parent.schedule(source, target, fromState, toState, data);
     }
 
-    when(name: string, state: State, handlerOrFunc: Partial<StateHandler> | StateEnterFunc);
-    when(name: string, transition: Transition, handlerOrFunc: Partial<TransHandler> | TransEnterFunc);
+    when(name: string, state: State, handlerOrFunc: Partial<StateHandler> | StateEnterFunc): HSM;
+    when(name: string, transition: Transition, handlerOrFunc: Partial<TransHandler> | TransEnterFunc): HSM;
     when(name: string, stateOrTransition: any, handlerOrFunc: any): HSM {
         let target = this.nodeOf[name];
         if (!target) {
@@ -621,17 +598,17 @@ export class HSM {
     }
 }
 
-interface FSMConfig {
+export interface FSMConfig {
     debug: boolean;
     requireHandler: boolean;
 }
 
 export class FSM {
-    private static ROOT = "FSM";
+    private static ROOT_NAME = "FSM";
     private hsm: HSM;
 
     private constructor(states: State[]) {
-        this.hsm = HSM.create(s(FSM.ROOT, states, []));
+        this.hsm = HSM.create(new Node(FSM.ROOT_NAME, states, []));
     }
 
     static create(states: State[] | {[state: string]: Partial<StateHandler> | StateEnterFunc}): FSM {
@@ -662,13 +639,13 @@ export class FSM {
     }
 
     set(state: State, data?: object): void {
-        this.hsm.tell(FSM.ROOT, state, data);
+        this.hsm.tell(FSM.ROOT_NAME, state, data);
     }
 
-    when(state: State, handlerOrFunc: Partial<StateHandler> | StateEnterFunc);
-    when(transition: Transition, handlerOrFunc: Partial<TransHandler> | TransEnterFunc);
+    when(state: State, handlerOrFunc: Partial<StateHandler> | StateEnterFunc): FSM;
+    when(transition: Transition, handlerOrFunc: Partial<TransHandler> | TransEnterFunc): FSM;
     when(stateOrTransition: any, handlerOrFunc: any): FSM {
-        this.hsm.when(FSM.ROOT, stateOrTransition, handlerOrFunc);
+        this.hsm.when(FSM.ROOT_NAME, stateOrTransition, handlerOrFunc);
         return this;
     }
 

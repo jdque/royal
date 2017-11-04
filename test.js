@@ -2,12 +2,12 @@ let {HSM, s, only} = require('./royal.js');
 
 let tree =
     s('LIGHT', ['red', 'yellow', 'green'], [
-        only('green', [
-            s('TIMER', ['on', 'off'])
-        ]),
         s('CAR', ['forward', 'reverse', 'brake']),
         s('PERSON', ['walk', 'idle'], [
             s('DIR', ['left', 'right'])
+        ]),
+        only('green', [
+            s('TIMER', ['on', 'off'])
         ])
     ]);
 
