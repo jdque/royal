@@ -332,17 +332,17 @@ export class HSM {
             }
         }
 
+        let newHandler = this.handlerOf[target.name][toState];
+        if (!newHandler && this.config.requireHandler) {
+            throw new Error(`No handler registered for: ${target.name} => ${toState}`)
+        }
+
         if (this.config.debug) {
             let indent = new Array(this.depth + 1).join('    ');
             console.log(`${indent}${target.name} => ${toState}`);
         }
 
         this.stateOf[target.name] = toState;
-
-        let newHandler = this.handlerOf[target.name][toState];
-        if (!newHandler && this.config.requireHandler) {
-            throw new Error(`No handler registered for: ${target.name} => ${toState}`)
-        }
 
         this.machineState = MachineState.ENTER;
         let enterRes = newHandler.enter(new HSM(target, this, toState), data);
