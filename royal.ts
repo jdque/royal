@@ -253,6 +253,7 @@ export class HSM {
     private handlerOf: {[name: string]: {[state: string]: StateHandler}};
     private guardOf: {[name: string]: {[from: string]: {[to: string]: TransHandler}}};
     private queueOf: {[name: string]: Array<TransCommand>};
+    private contextOf: {[name: string]: HSM};
 
     private constructor(node: Node, parent: HSM = null, state: State = '*') {
         this.parent = parent;
@@ -269,6 +270,7 @@ export class HSM {
         this.handlerOf = {};
         this.guardOf = {};
         this.queueOf = {};
+        this.contextOf = {};
 
         let children = this.node.getChildren(this.state);
         for (let child of children) {
@@ -301,6 +303,7 @@ export class HSM {
         this.handlerOf[name] = {};
         this.guardOf[name] = {};
         this.queueOf[name] = [];
+        this.contextOf[name] = null;
     }
 
     private isGuarded(target: Node, from: State, to: State): boolean {
@@ -326,9 +329,12 @@ export class HSM {
         if (fromState) {
             let oldHandler = this.handlerOf[target.name][fromState];
             if (oldHandler && oldHandler.exit) {
+                //--------
                 this.machineState = MachineState.EXIT;
                 oldHandler.exit();
+                this.contextOf[target.name] = null;
                 this.machineState = MachineState.NONE;
+                //--------
             }
         }
 
@@ -342,11 +348,14 @@ export class HSM {
             console.log(`${indent}${target.name} => ${toState}`);
         }
 
-        this.stateOf[target.name] = toState;
-
+        //--------
         this.machineState = MachineState.ENTER;
-        let enterRes = newHandler.enter(new HSM(target, this, toState), data);
+        let context = new HSM(target, this, toState);
+        this.contextOf[target.name] = context;
+        this.stateOf[target.name] = toState;
+        let enterRes = newHandler.enter ? newHandler.enter(context, data) : null;
         this.machineState = MachineState.NONE;
+        //--------
 
         if (isPartialHandler(enterRes)) {
             newHandler.update = enterRes.update || null;
@@ -373,9 +382,11 @@ export class HSM {
             },
             proceed: () => {
                 if (handler.exit) {
+                    //--------
                     this.machineState = MachineState.EXIT;
                     handler.exit();
                     this.machineState = MachineState.NONE;
+                    //--------
                 }
 
                 let queue = this.queueOf[target.name];
@@ -391,9 +402,11 @@ export class HSM {
             }
         };
 
+        //--------
         this.machineState = MachineState.ENTER;
-        let enterRes = handler.enter(guard, data);
+        let enterRes = handler.enter ? handler.enter(guard, data) : null;
         this.machineState = MachineState.NONE;
+        //--------
 
         if (enterRes === true) {
             guard.proceed();
@@ -577,23 +590,30 @@ export class HSM {
     }
 
     update(delta: number): void {
-        for (let name in this.stateOf) {
-            let state = this.stateOf[name];
-            if (!state) {
+        for (let name in this.contextOf) {
+            if (!this.contextOf[name]) {
                 continue;
             }
-            let handler = this.handlerOf[name][state];
-            if (!handler || !handler.update) {
-                continue;
-            }
+            this.contextOf[name].update(delta);
+        }
 
-            this.machineState = MachineState.UPDATE;
-            this.handlerOf[name][state].update(this, delta);
-            this.machineState = MachineState.NONE;
+        if (!this.parent) {
+            return;
+        }
 
-            if (this.queueOf[name].length > 0) {
-                this.run(this.nodeOf[name]);
-            }
+        let handler = this.parent.handlerOf[this.node.name][this.state];
+        if (!handler || !handler.update) {
+            return;
+        }
+
+        //--------
+        this.machineState = MachineState.UPDATE;
+        handler.update(this, delta);
+        this.machineState = MachineState.NONE;
+        //--------
+
+        if (this.parent.queueOf[this.node.name].length > 0) {
+            this.parent.run(this.node);
         }
     }
 }
