@@ -155,31 +155,34 @@ class Node {
         this.childMap['*'] = {};
 
         for (let child of children) {
-            if (child instanceof Restrictor) {
-                for (let grandChild of child.children) {
-                    for (let state of child.states) {
-                        if (this.childMap[state][grandChild.name]) {
-                            throw new Error(`Duplicate node: ${grandChild.name}`);
-                        }
-                        this.childMap[state][grandChild.name] = grandChild;
-                        this.children.push(grandChild);
+            this.initChild(child);
+        }
+    }
+
+    private initChild(child: Node|Restrictor) {
+        if (child instanceof Restrictor) {
+            for (let grandChild of child.children) {
+                for (let state of child.states) {
+                    if (this.childMap[state][grandChild.name]) {
+                        throw new Error(`Duplicate node: ${grandChild.name}`);
                     }
+                    this.childMap[state][grandChild.name] = grandChild;
+                    this.children.push(grandChild);
                 }
             }
-            else {
-                if (this.childMap['*'][child.name]) {
-                    throw new Error(`Duplicate node: ${child.name}`);
-                }
-                this.childMap['*'][child.name] = child;
-                this.children.push(child);
+        }
+        else {
+            if (this.childMap['*'][child.name]) {
+                throw new Error(`Duplicate node: ${child.name}`);
             }
+            this.childMap['*'][child.name] = child;
+            this.children.push(child);
         }
     }
 
     static create(name: string, states: State[], children: Node[] = []) : Node {
         return new Node(name, states, children);
     }
-
 
     hasChild(name: string, state: State): boolean {
         if (!this.hasState(state)) {
