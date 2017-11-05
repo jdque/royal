@@ -18,7 +18,7 @@ interface TransCommand {
 }
 
 interface EnterFunc<T> {
-    (t: T, data?: object): Partial<Handler<T>> | ExitFunc<T> | boolean | void;
+    (t: T): Partial<Handler<T>> | ExitFunc<T> | boolean | void;
 }
 
 interface UpdateFunc<T> {
@@ -41,9 +41,9 @@ interface Guard {
     proceed: () => void;
 }
 
-type StateEnterFunc = EnterFunc<HSM>;
-type StateExitFunc = ExitFunc<HSM>;
-type StateHandler = Handler<HSM>;
+type StateEnterFunc = EnterFunc<Context>;
+type StateExitFunc = ExitFunc<Context>;
+type StateHandler = Handler<Context>;
 type TransEnterFunc = EnterFunc<Guard>;
 type TransExitFunc = ExitFunc<Guard>;
 type TransHandler = Handler<Guard>;
@@ -236,16 +236,12 @@ export function only(states: State|Array<State>, children?: Array<Node>): Restri
     return new Restrictor(states, children);
 }
 
-export interface HSMConfig {
-    debug: boolean;
-    requireHandler: boolean;
-}
-
-export class HSM {
-    private parent: HSM;
+class Context {
+    private parent: Context;
     private node: Node;
     private state: State;
     private depth: number;
+    public readonly data: object;  // TODO - make this a getter
     private config: HSMConfig;
     private machineState: MachineState;
     private nodeOf: {[name: string]: Node};
@@ -253,17 +249,15 @@ export class HSM {
     private handlerOf: {[name: string]: {[state: string]: StateHandler}};
     private guardOf: {[name: string]: {[from: string]: {[to: string]: TransHandler}}};
     private queueOf: {[name: string]: Array<TransCommand>};
-    private contextOf: {[name: string]: HSM};
+    private contextOf: {[name: string]: Context};
 
-    private constructor(node: Node, parent: HSM = null, state: State = '*') {
+    constructor(node: Node, parent: Context = null, state: State = '*', data: object = {}) {
         this.parent = parent;
         this.node = node;
         this.state = state;
+        this.data = data;
         this.depth = parent ? parent.depth + 1 : 0;
-        this.config = parent ? parent.config : {
-            debug: false,
-            requireHandler: false
-        };
+        this.config = parent ? parent.config : null;
         this.machineState = MachineState.NONE;
         this.nodeOf = {};
         this.stateOf = {};
@@ -276,24 +270,6 @@ export class HSM {
         for (let child of children) {
             this.initChild(child);
         }
-    }
-
-    static create(...nodes: Node[]): HSM {
-        let sentinel = new Node('__root', [], nodes);
-        let hsm = new HSM(sentinel);
-
-        return hsm;
-    }
-
-    configure(config: Partial<HSMConfig>): HSM {
-        if ('debug' in config) {
-            this.config.debug = config.debug;
-        }
-        if ('requireHandler' in config) {
-            this.config.requireHandler = config.requireHandler;
-        }
-
-        return this;
     }
 
     private initChild(node: Node): void {
@@ -350,10 +326,10 @@ export class HSM {
 
         //--------
         this.machineState = MachineState.ENTER;
-        let context = new HSM(target, this, toState);
+        let context = new Context(target, this, toState, data);
         this.contextOf[target.name] = context;
         this.stateOf[target.name] = toState;
-        let enterRes = newHandler.enter ? newHandler.enter(context, data) : null;
+        let enterRes = newHandler.enter ? newHandler.enter(context) : null;
         this.machineState = MachineState.NONE;
         //--------
 
@@ -404,7 +380,7 @@ export class HSM {
 
         //--------
         this.machineState = MachineState.ENTER;
-        let enterRes = handler.enter ? handler.enter(guard, data) : null;
+        let enterRes = handler.enter ? handler.enter(guard) : null;
         this.machineState = MachineState.NONE;
         //--------
 
@@ -494,9 +470,9 @@ export class HSM {
         this.parent.schedule(source, target, fromState, toState, data);
     }
 
-    when(name: string, state: State, handlerOrFunc: Partial<StateHandler> | StateEnterFunc): HSM;
-    when(name: string, transition: Transition, handlerOrFunc: Partial<TransHandler> | TransEnterFunc): HSM;
-    when(name: string, stateOrTransition: any, handlerOrFunc: any): HSM {
+    when(name: string, state: State, handlerOrFunc: Partial<StateHandler> | StateEnterFunc): Context;
+    when(name: string, transition: Transition, handlerOrFunc: Partial<TransHandler> | TransEnterFunc): Context;
+    when(name: string, stateOrTransition: any, handlerOrFunc: any): Context {
         let target = this.nodeOf[name];
         if (!target) {
             throw new Error(`Name doesn't exist in this context: ${name}`);
@@ -616,6 +592,52 @@ export class HSM {
             this.parent.run(this.node);
         }
     }
+
+    configure(config: HSMConfig): void {
+        this.config = config;
+
+        for (let name in this.contextOf) {
+            if (!this.contextOf[name]) {
+                continue;
+            }
+            this.contextOf[name].configure(config);
+        }
+    }
+}
+
+export interface HSMConfig {
+    debug: boolean;
+    requireHandler: boolean;
+}
+
+export class HSM {
+    private static ROOT_NAME = '__sentinel__';
+    public readonly context: Context;
+    public readonly config: HSMConfig;
+
+    private constructor(nodes: Node[]) {
+        let sentinel = new Node(HSM.ROOT_NAME, [], nodes);
+        this.context = new Context(sentinel);
+        this.config = {
+            debug: false,
+            requireHandler: false
+        };
+        this.context.configure(this.config);
+    }
+
+    static create(...nodes: Node[]): HSM {
+        return new HSM(nodes);
+    }
+
+    configure(config: Partial<HSMConfig>): void {
+        if ('debug' in config) {
+            this.config.debug = config.debug;
+        }
+        if ('requireHandler' in config) {
+            this.config.requireHandler = config.requireHandler;
+        }
+        this.context.configure(this.config);
+    }
 }
 
 export interface FSMConfig {
@@ -624,7 +646,7 @@ export interface FSMConfig {
 }
 
 export class FSM {
-    private static ROOT_NAME = "FSM";
+    private static ROOT_NAME = '__fsm__';
     private hsm: HSM;
 
     private constructor(states: State[]) {
@@ -659,17 +681,17 @@ export class FSM {
     }
 
     set(state: State, data?: object): void {
-        this.hsm.tell(FSM.ROOT_NAME, state, data);
+        this.hsm.context.tell(FSM.ROOT_NAME, state, data);
     }
 
     when(state: State, handlerOrFunc: Partial<StateHandler> | StateEnterFunc): FSM;
     when(transition: Transition, handlerOrFunc: Partial<TransHandler> | TransEnterFunc): FSM;
     when(stateOrTransition: any, handlerOrFunc: any): FSM {
-        this.hsm.when(FSM.ROOT_NAME, stateOrTransition, handlerOrFunc);
+        this.hsm.context.when(FSM.ROOT_NAME, stateOrTransition, handlerOrFunc);
         return this;
     }
 
     update(delta: number): void {
-        this.hsm.update(delta);
+        this.hsm.context.update(delta);
     }
 }

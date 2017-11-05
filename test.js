@@ -18,38 +18,40 @@ hsm.configure({
     requireHandler: true
 });
 
-hsm.when('LIGHT', 'red', (hsm, data) => {
-    hsm.set('green');
+let ctx = hsm.context;
+
+ctx.when('LIGHT', 'red', (ctx) => {
+    ctx.set('green');
 });
 
-hsm.when('LIGHT', 'yellow', (hsm, data) => {
-    hsm.set('red');
+ctx.when('LIGHT', 'yellow', (ctx) => {
+    ctx.set('red');
 });
 
-hsm.when('LIGHT', 'green', (hsm, data) => {
-    hsm.when('CAR', 'forward', (hsm, data) => {
-        hsm.set('brake');
+ctx.when('LIGHT', 'green', (ctx) => {
+    ctx.when('CAR', 'forward', (ctx) => {
+        ctx.set('brake');
     });
 
-    hsm.when('CAR', 'brake', (hsm, data) => {
-        hsm.ask('PERSON', 'walk')
+    ctx.when('CAR', 'brake', (ctx) => {
+        ctx.ask('PERSON', 'walk')
     });
 
-    hsm.when('PERSON', 'walk', (hsm, data) => {
+    ctx.when('PERSON', 'walk', (ctx) => {
     });
 
-    hsm.when('PERSON', 'idle', (hsm, data) => {
+    ctx.when('PERSON', 'idle', (ctx) => {
     });
 
-    hsm.tell('CAR', 'forward');
-    hsm.tell('PERSON', 'idle');
+    ctx.tell('CAR', 'forward');
+    ctx.tell('PERSON', 'idle');
 
-    hsm.set('yellow');
+    ctx.set('yellow');
 });
 
-hsm.when('LIGHT', {'*' : '*'}, (guard, data) => {
+ctx.when('LIGHT', {'*' : '*'}, (guard) => {
     console.log('----')
     guard.proceed();
 });
 
-hsm.tell('LIGHT', 'green');
+ctx.tell('LIGHT', 'green');
