@@ -278,11 +278,9 @@ class Context {
     private initChild(node: Node): void {
         let name = node.name;
         this.nodeOf[name] = node;
-        this.stateOf[name] = null;
         this.handlerOf[name] = {};
         this.guardOf[name] = {};
         this.queueOf[name] = [];
-        this.contextOf[name] = null;
     }
 
     private isGuarded(target: Node, from: State, to: State): boolean {
@@ -302,46 +300,80 @@ class Context {
         return true;
     }
 
-    private execTransition(transCommand: TransCommand): void {
-        let {source, target, fromState, toState, data} = transCommand;
-
-        if (fromState) {
-            let oldHandler = this.handlerOf[target.name][fromState];
-            if (oldHandler && oldHandler.exit) {
-                //--------
-                this.machineState = MachineState.EXIT;
-                oldHandler.exit();
-                this.contextOf[target.name] = null;
-                this.machineState = MachineState.NONE;
-                //--------
-            }
+    //TODO - better name
+    private selfEnter(toState: State) {
+        this.machineState = MachineState.ENTER;
+        //--------
+        let handler = this.parent.handlerOf[this.node.name][toState];
+        if (!handler && this.config.requireHandler) {
+            throw new Error(`No handler registered for: ${this.node.name}: enter ${toState}`);
         }
 
-        let newHandler = this.handlerOf[target.name][toState];
-        if (!newHandler && this.config.requireHandler) {
-            throw new Error(`No handler registered for: ${target.name} => ${toState}`)
+        let enterRes = null;
+        if (handler && handler.enter) {
+            enterRes = handler.enter(this);
         }
+
+        if (isPartialHandler(enterRes)) {
+            handler.update = enterRes.update || null;
+            handler.exit = enterRes.exit || null;
+        }
+        else if (isFunction(enterRes)) {
+            handler.exit = enterRes;
+        }
+        //--------
+        this.machineState = MachineState.NONE;
+    }
+
+    private selfExit(fromState: State) {
+        this.machineState = MachineState.EXIT;
+        //--------
+        for (let name in this.contextOf) {
+            this.execExit(this.nodeOf[name], this.stateOf[name]);
+        }
+
+        let handler = this.parent.handlerOf[this.node.name][fromState];
+        if (!handler && this.config.requireHandler) {
+            throw new Error(`No handler registered for: ${this.node.name}: enter ${fromState}`);
+        }
+
+        if (handler && handler.exit) {
+            handler.exit();
+        }
+        //--------
+        this.machineState = MachineState.NONE;
+    }
+
+    private execEnter(target: Node, toState: State, data: object): void {
+        let context = new Context(target, this, toState, data);
+        this.contextOf[target.name] = context;
+        this.stateOf[target.name] = toState;
 
         if (this.config.debug) {
             let indent = new Array(this.depth + 1).join('    ');
             console.log(`${indent}${target.name} => ${toState}`);
         }
 
-        //--------
-        this.machineState = MachineState.ENTER;
-        let context = new Context(target, this, toState, data);
-        this.contextOf[target.name] = context;
-        this.stateOf[target.name] = toState;
-        let enterRes = newHandler.enter ? newHandler.enter(context) : null;
-        this.machineState = MachineState.NONE;
-        //--------
+        context.selfEnter(toState);
+    }
 
-        if (isPartialHandler(enterRes)) {
-            newHandler.update = enterRes.update || null;
-            newHandler.exit = enterRes.exit || null;
+    private execExit(target: Node, fromState: State): void {
+        let context = this.contextOf[target.name];
+        delete this.contextOf[target.name];
+        delete this.stateOf[target.name];
+
+        context.selfExit(fromState);
+    }
+
+    private execTransition(transCommand: TransCommand): void {
+        let {source, target, fromState, toState, data} = transCommand;
+
+        if (fromState) {
+            this.execExit(target, fromState);
         }
-        else if (isFunction(enterRes)) {
-            newHandler.exit = enterRes;
+
+        if (toState) {
+            this.execEnter(target, toState, data);
         }
     }
 
@@ -360,13 +392,13 @@ class Context {
                 //TODO
             },
             proceed: () => {
+                this.machineState = MachineState.EXIT;
+                //--------
                 if (handler.exit) {
-                    //--------
-                    this.machineState = MachineState.EXIT;
                     handler.exit();
-                    this.machineState = MachineState.NONE;
-                    //--------
                 }
+                //--------
+                this.machineState = MachineState.NONE;
 
                 let queue = this.queueOf[target.name];
                 if (queue.length > 0) {
@@ -381,11 +413,12 @@ class Context {
             }
         };
 
-        //--------
         this.machineState = MachineState.ENTER;
-        let enterRes = handler.enter ? handler.enter(guard) : null;
-        this.machineState = MachineState.NONE;
         //--------
+        let enterRes = null;
+        if (handler.enter) {
+            enterRes = handler.enter(guard);
+        }
 
         if (enterRes === true) {
             guard.proceed();
@@ -397,9 +430,11 @@ class Context {
         else if (isFunction(enterRes)) {
             handler.exit = enterRes;
         }
+        //--------
+        this.machineState = MachineState.NONE;
     }
 
-    private execState(transCommand: TransCommand): void {
+    private execCommand(transCommand: TransCommand): void {
         let {source, target, fromState, toState, data} = transCommand;
 
         if (this.stateOf[target.name] !== fromState) {
@@ -418,7 +453,7 @@ class Context {
         let queue = this.queueOf[target.name];
         while (queue.length > 0) {
             let command = queue[0];
-            this.execState(command);
+            this.execCommand(command);
             queue.shift();
         }
     }
@@ -569,10 +604,10 @@ class Context {
     }
 
     update(delta: number): void {
+        this.machineState = MachineState.UPDATE;
+        //--------
+
         for (let name in this.contextOf) {
-            if (!this.contextOf[name]) {
-                continue;
-            }
             this.contextOf[name].update(delta);
         }
 
@@ -581,15 +616,12 @@ class Context {
         }
 
         let handler = this.parent.handlerOf[this.node.name][this.state];
-        if (!handler || !handler.update) {
-            return;
+        if (handler && handler.update) {
+            handler.update(this, delta);
         }
 
         //--------
-        this.machineState = MachineState.UPDATE;
-        handler.update(this, delta);
         this.machineState = MachineState.NONE;
-        //--------
 
         if (this.parent.queueOf[this.node.name].length > 0) {
             this.parent.run(this.node);
@@ -600,9 +632,6 @@ class Context {
         this.config = config;
 
         for (let name in this.contextOf) {
-            if (!this.contextOf[name]) {
-                continue;
-            }
             this.contextOf[name].configure(config);
         }
     }
