@@ -112,6 +112,10 @@ function isPartialHandler<T>(obj: any): obj is Partial<Handler<T>> {
     return 'enter' in obj || 'update' in obj || 'exit' in obj;
 }
 
+function isState(state: any): state is State {
+    return typeof state === 'string';
+}
+
 function isTransition(transition: any): transition is Transition {
     return typeof transition === 'object' && Object.keys(transition).length === 1;
 }
@@ -532,7 +536,7 @@ class Context {
             }
             else if (isFunction(handlerOrFunc)) {
                 handler = {
-                    enter: <TransEnterFunc>handlerOrFunc,
+                    enter: handlerOrFunc as TransEnterFunc,
                     update: null,
                     exit: null
                 };
@@ -544,7 +548,7 @@ class Context {
             }
             guards[from][to] = handler;
         }
-        else {
+        else if (isState(stateOrTransition)) {
             let state = stateOrTransition;
             if (!target.hasState(state)) {
                 throw new Error(`${name} doesn't have state: ${state}`);
@@ -560,7 +564,7 @@ class Context {
             }
             else if (isFunction(handlerOrFunc)) {
                 handler = {
-                    enter: <StateEnterFunc>handlerOrFunc,
+                    enter: handlerOrFunc as StateEnterFunc,
                     update: null,
                     exit: null
                 };
@@ -592,14 +596,14 @@ class Context {
     on(request: BetweenReq, func: TransEnterFunc): void;
     on(request: Request, func: Function): void {
         if (isEnterReq(request)) {
-            this.when(request.name, request.state, <StateEnterFunc>func);
+            this.when(request.name, request.state, func as StateEnterFunc);
         }
         else if (isExitReq(request)) {
             //TODO
         }
         else if (isBetweenReq(request)) {
             let transition = makeTransition(request.from, request.to);
-            this.when(request.name, transition, <TransEnterFunc>func);
+            this.when(request.name, transition, func as TransEnterFunc);
         }
     }
 
