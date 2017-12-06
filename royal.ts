@@ -301,14 +301,9 @@ class Context {
     }
 
     //TODO - better name
-    private selfEnter(toState: State) {
+    private selfEnter(toState: State, handler: StateHandler) {
         this.machineState = MachineState.ENTER;
         //--------
-        let handler = this.parent.handlerOf[this.node.name][toState];
-        if (!handler && this.config.requireHandler) {
-            throw new Error(`No handler registered for: ${this.node.name}: enter ${toState}`);
-        }
-
         let enterRes = null;
         if (handler && handler.enter) {
             enterRes = handler.enter(this);
@@ -325,20 +320,29 @@ class Context {
         this.machineState = MachineState.NONE;
     }
 
-    private selfExit(fromState: State) {
+    private selfExit(fromState: State, handler: StateHandler) {
         this.machineState = MachineState.EXIT;
         //--------
         for (let name in this.contextOf) {
             this.execExit(this.nodeOf[name], this.stateOf[name]);
         }
 
-        let handler = this.parent.handlerOf[this.node.name][fromState];
-        if (!handler && this.config.requireHandler) {
-            throw new Error(`No handler registered for: ${this.node.name}: enter ${fromState}`);
-        }
-
         if (handler && handler.exit) {
             handler.exit();
+        }
+        //--------
+        this.machineState = MachineState.NONE;
+    }
+
+    private selfUpdate(state: State, handler: StateHandler, delta: number) {
+        this.machineState = MachineState.UPDATE;
+        //--------
+        for (let name in this.contextOf) {
+            this.execUpdate(this.nodeOf[name], this.stateOf[name], delta);
+        }
+
+        if (handler && handler.update) {
+            handler.update(this, delta);
         }
         //--------
         this.machineState = MachineState.NONE;
@@ -354,7 +358,12 @@ class Context {
             console.log(`${indent}${target.name} => ${toState}`);
         }
 
-        context.selfEnter(toState);
+        let handler = this.handlerOf[target.name][toState];
+        if (!handler && this.config.requireHandler) {
+            throw new Error(`No handler registered for: ${target.name}: enter ${toState}`);
+        }
+
+        context.selfEnter(toState, handler);
     }
 
     private execExit(target: Node, fromState: State): void {
@@ -362,7 +371,27 @@ class Context {
         delete this.contextOf[target.name];
         delete this.stateOf[target.name];
 
-        context.selfExit(fromState);
+        let handler = this.handlerOf[target.name][fromState];
+        if (!handler && this.config.requireHandler) {
+            throw new Error(`No handler registered for: ${target.name}: enter ${fromState}`);
+        }
+
+        context.selfExit(fromState, handler);
+    }
+
+    private execUpdate(target: Node, state: State, delta: number): void {
+        let context = this.contextOf[target.name];
+
+        let handler = this.handlerOf[target.name][state];
+        if (!handler && this.config.requireHandler) {
+            throw new Error(`No handler registered for: ${target.name}: enter ${state}`);
+        }
+
+        context.selfUpdate(state, handler, delta);
+
+        if (this.queueOf[target.name].length > 0) {
+            this.run(target);
+        }
     }
 
     private execTransition(transCommand: TransCommand): void {
@@ -604,28 +633,7 @@ class Context {
     }
 
     update(delta: number): void {
-        this.machineState = MachineState.UPDATE;
-        //--------
-
-        for (let name in this.contextOf) {
-            this.contextOf[name].update(delta);
-        }
-
-        if (!this.parent) {
-            return;
-        }
-
-        let handler = this.parent.handlerOf[this.node.name][this.state];
-        if (handler && handler.update) {
-            handler.update(this, delta);
-        }
-
-        //--------
-        this.machineState = MachineState.NONE;
-
-        if (this.parent.queueOf[this.node.name].length > 0) {
-            this.parent.run(this.node);
-        }
+        this.parent.execUpdate(this.node, this.state, delta);
     }
 
     configure(config: HSMConfig): void {
