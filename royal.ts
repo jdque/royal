@@ -2,11 +2,12 @@ type State = string;
 type Transition = {[from: string]: /*to:*/ State};
 
 enum MachineState {
-    NONE,
+    IDLE,
+    DEAD,
     ENTER,
     EXIT,
+    UPDATE,
     GUARD,
-    UPDATE
 }
 
 interface TransCommand {
@@ -258,7 +259,7 @@ class GuardContext implements Context {
     constructor(guard: Guard, handler: GuardHandler) {
         this.guard = guard;
         this.handler = handler;
-        this.machineState = MachineState.NONE;
+        this.machineState = MachineState.IDLE;
     }
 
     selfEnter() {
@@ -282,7 +283,7 @@ class GuardContext implements Context {
             this.handler.exit = enterRes;
         }
         //--------
-        this.machineState = MachineState.NONE;
+        this.machineState = MachineState.IDLE;
 
         if (shouldProceed) {
             this.guard.proceed();
@@ -296,7 +297,7 @@ class GuardContext implements Context {
             this.handler.exit();
         }
         //--------
-        this.machineState = MachineState.NONE;
+        this.machineState = MachineState.DEAD;
     }
 
     selfUpdate(delta: number) {
@@ -306,7 +307,7 @@ class GuardContext implements Context {
             this.handler.update(this.guard, delta);
         }
         //--------
-        this.machineState = MachineState.NONE;
+        this.machineState = MachineState.IDLE;
     }
 
     selfConfigure(config: HSMConfig) {
@@ -338,7 +339,7 @@ class StateContext implements Context {
         this.data = data;
         this.depth = parent ? parent.depth + 1 : 0;
         this.config = parent ? parent.config : null;
-        this.machineState = MachineState.NONE;
+        this.machineState = MachineState.IDLE;
         this.nodeOf = {};
         this.stateOf = {};
         this.handlerOf = {};
@@ -394,7 +395,7 @@ class StateContext implements Context {
             this.handler.exit = enterRes;
         }
         //--------
-        this.machineState = MachineState.NONE;
+        this.machineState = MachineState.IDLE;
     }
 
     selfExit() {
@@ -408,7 +409,7 @@ class StateContext implements Context {
             this.handler.exit();
         }
         //--------
-        this.machineState = MachineState.NONE;
+        this.machineState = MachineState.DEAD;
     }
 
     selfUpdate(delta: number) {
@@ -422,7 +423,7 @@ class StateContext implements Context {
             this.handler.update(this, delta);
         }
         //--------
-        this.machineState = MachineState.NONE;
+        this.machineState = MachineState.IDLE;
     }
 
     selfConfigure(config: HSMConfig) {
@@ -497,7 +498,7 @@ class StateContext implements Context {
             from: fromName,
             cancel: () => {
                 if (prevStateContext) {
-                    prevStateContext.machineState = MachineState.NONE;
+                    prevStateContext.machineState = MachineState.IDLE;
                 }
 
                 let guardContext = this.contextOf[target.name];
@@ -506,7 +507,7 @@ class StateContext implements Context {
             },
             proceed: () => {
                 if (prevStateContext) {
-                    prevStateContext.machineState = MachineState.NONE;
+                    prevStateContext.machineState = MachineState.IDLE;
                 }
 
                 let guardContext = this.contextOf[target.name];
@@ -584,6 +585,10 @@ class StateContext implements Context {
     }
 
     tell(name: string, state: State, data?: object): void {
+        if (this.machineState === MachineState.DEAD) {
+            throw new Error("Context was called after it has exited");
+        }
+
         let source = this.node;
         let target = this.nodeOf[name];
         let fromState = this.stateOf[name];
@@ -593,6 +598,10 @@ class StateContext implements Context {
     }
 
     ask(name: string, state: State, data?: object): void {
+        if (this.machineState === MachineState.DEAD) {
+            throw new Error("Context was called after it has exited");
+        }
+
         let source = this.node;
         let target = this.parent.nodeOf[name];
         let fromState = this.parent.stateOf[name];
@@ -602,6 +611,10 @@ class StateContext implements Context {
     }
 
     set(state: State, data?: object): void {
+        if (this.machineState === MachineState.DEAD) {
+            throw new Error("Context was called after it has exited");
+        }
+
         let source = this.node;
         let target = this.node;
         let fromState = this.parent.stateOf[this.node.name];
@@ -613,6 +626,10 @@ class StateContext implements Context {
     when(name: string, state: State, handlerOrFunc: Partial<StateHandler> | StateEnterFunc): StateContext;
     when(name: string, transition: Transition, handlerOrFunc: Partial<GuardHandler> | GuardEnterFunc): StateContext;
     when(name: string, stateOrTransition: any, handlerOrFunc: any): StateContext {
+        if (this.machineState === MachineState.DEAD) {
+            throw new Error("Context was called after it has exited");
+        }
+
         let target = this.nodeOf[name];
         if (!target) {
             throw new Error(`Name doesn't exist in this context: ${name}`);
@@ -706,10 +723,18 @@ class StateContext implements Context {
     }
 
     update(delta: number): void {
+        if (this.machineState === MachineState.DEAD) {
+            throw new Error("Context was called after it has exited");
+        }
+
         this.selfUpdate(delta);
     }
 
     configure(config: HSMConfig): void {
+        if (this.machineState === MachineState.DEAD) {
+            throw new Error("Context was called after it has exited");
+        }
+
         this.selfConfigure(config);
     }
 }
