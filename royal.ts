@@ -41,12 +41,12 @@ interface Guard {
     proceed: () => void;
 }
 
-type StateEnterFunc = EnterFunc<Context>;
-type StateExitFunc = ExitFunc<Context>;
-type StateHandler = Handler<Context>;
-type TransEnterFunc = EnterFunc<Guard>;
-type TransExitFunc = ExitFunc<Guard>;
-type TransHandler = Handler<Guard>;
+type StateEnterFunc = EnterFunc<StateContext>;
+type StateExitFunc = ExitFunc<StateContext>;
+type StateHandler = Handler<StateContext>;
+type GuardEnterFunc = EnterFunc<Guard>;
+type GuardExitFunc = ExitFunc<Guard>;
+type GuardHandler = Handler<Guard>;
 
 interface Wrapper {
     name: string;
@@ -243,10 +243,82 @@ export function only(states: State|Array<State>, children?: Array<Node>): Restri
     return new Restrictor(states, children);
 }
 
-class Context {
-    private parent: Context;
+interface Context {
+    selfEnter: () => void;
+    selfExit: () => void;
+    selfUpdate: (delta: number) => void;
+    selfConfigure: (config: HSMConfig) => void;
+}
+
+class GuardContext implements Context {
+    private guard: Guard;
+    private handler: GuardHandler;
+    private machineState: MachineState;
+
+    constructor(guard: Guard, handler: GuardHandler) {
+        this.guard = guard;
+        this.handler = handler;
+        this.machineState = MachineState.NONE;
+    }
+
+    selfEnter() {
+        let shouldProceed = false;
+
+        this.machineState = MachineState.ENTER;
+        //--------
+        let enterRes = null;
+        if (this.handler && this.handler.enter) {
+            enterRes = this.handler.enter(this.guard);
+        }
+
+        if (enterRes === true) {
+            shouldProceed = true;
+        }
+        else if (isPartialHandler(enterRes)) {
+            this.handler.update = enterRes.update || null;
+            this.handler.exit = enterRes.exit || null;
+        }
+        else if (isFunction(enterRes)) {
+            this.handler.exit = enterRes;
+        }
+        //--------
+        this.machineState = MachineState.NONE;
+
+        if (shouldProceed) {
+            this.guard.proceed();
+        }
+    }
+
+    selfExit() {
+        this.machineState = MachineState.EXIT;
+        //--------
+        if (this.handler.exit) {
+            this.handler.exit();
+        }
+        //--------
+        this.machineState = MachineState.NONE;
+    }
+
+    selfUpdate(delta: number) {
+        this.machineState = MachineState.UPDATE;
+        //--------
+        if (this.handler.update) {
+            this.handler.update(this.guard, delta);
+        }
+        //--------
+        this.machineState = MachineState.NONE;
+    }
+
+    selfConfigure(config: HSMConfig) {
+        // NOOP
+    }
+}
+
+class StateContext implements Context {
+    private parent: StateContext;
     private node: Node;
     private state: State;
+    private handler: StateHandler;
     private depth: number;
     public readonly data: object;  // TODO - make this a getter
     private config: HSMConfig;
@@ -254,14 +326,15 @@ class Context {
     private nodeOf: {[name: string]: Node};
     private stateOf: {[name: string]: State};
     private handlerOf: {[name: string]: {[state: string]: StateHandler}};
-    private guardOf: {[name: string]: {[from: string]: {[to: string]: TransHandler}}};
+    private guardOf: {[name: string]: {[from: string]: {[to: string]: GuardHandler}}};
     private queueOf: {[name: string]: Array<TransCommand>};
     private contextOf: {[name: string]: Context};
 
-    constructor(node: Node, parent: Context = null, state: State = '*', data: object = {}) {
+    constructor(node: Node, parent: StateContext = null, state: State = '*', handler: StateHandler = null, data: object = {}) {
         this.parent = parent;
         this.node = node;
         this.state = state;
+        this.handler = handler;
         this.data = data;
         this.depth = parent ? parent.depth + 1 : 0;
         this.config = parent ? parent.config : null;
@@ -305,55 +378,68 @@ class Context {
     }
 
     //TODO - better name
-    private selfEnter(toState: State, handler: StateHandler) {
+    selfEnter() {
         this.machineState = MachineState.ENTER;
         //--------
         let enterRes = null;
-        if (handler && handler.enter) {
-            enterRes = handler.enter(this);
+        if (this.handler && this.handler.enter) {
+            enterRes = this.handler.enter(this);
         }
 
         if (isPartialHandler(enterRes)) {
-            handler.update = enterRes.update || null;
-            handler.exit = enterRes.exit || null;
+            this.handler.update = enterRes.update || null;
+            this.handler.exit = enterRes.exit || null;
         }
         else if (isFunction(enterRes)) {
-            handler.exit = enterRes;
+            this.handler.exit = enterRes;
         }
         //--------
         this.machineState = MachineState.NONE;
     }
 
-    private selfExit(fromState: State, handler: StateHandler) {
+    selfExit() {
         this.machineState = MachineState.EXIT;
         //--------
         for (let name in this.contextOf) {
             this.execExit(this.nodeOf[name], this.stateOf[name]);
         }
 
-        if (handler && handler.exit) {
-            handler.exit();
+        if (this.handler && this.handler.exit) {
+            this.handler.exit();
         }
         //--------
         this.machineState = MachineState.NONE;
     }
 
-    private selfUpdate(state: State, handler: StateHandler, delta: number) {
+    selfUpdate(delta: number) {
         this.machineState = MachineState.UPDATE;
         //--------
         for (let name in this.contextOf) {
             this.execUpdate(this.nodeOf[name], this.stateOf[name], delta);
         }
 
-        if (handler && handler.update) {
-            handler.update(this, delta);
+        if (this.handler && this.handler.update) {
+            this.handler.update(this, delta);
         }
         //--------
         this.machineState = MachineState.NONE;
     }
 
+    selfConfigure(config: HSMConfig) {
+        this.config = config;
+
+        for (let name in this.contextOf) {
+            this.contextOf[name].selfConfigure(config);
+        }
+    }
+
     private execEnter(target: Node, toState: State, data: object): void {
-        let context = new Context(target, this, toState, data);
+        let handler = this.handlerOf[target.name][toState];
+        if (!handler && this.config.requireHandler) {
+            throw new Error(`No handler registered for: ${target.name}: enter ${toState}`);
+        }
+
+        let context = new StateContext(target, this, toState, handler, data);
         this.contextOf[target.name] = context;
         this.stateOf[target.name] = toState;
 
@@ -362,12 +448,7 @@ class Context {
             console.log(`${indent}${target.name} => ${toState}`);
         }
 
-        let handler = this.handlerOf[target.name][toState];
-        if (!handler && this.config.requireHandler) {
-            throw new Error(`No handler registered for: ${target.name}: enter ${toState}`);
-        }
-
-        context.selfEnter(toState, handler);
+        context.selfEnter();
     }
 
     private execExit(target: Node, fromState: State): void {
@@ -375,23 +456,13 @@ class Context {
         delete this.contextOf[target.name];
         delete this.stateOf[target.name];
 
-        let handler = this.handlerOf[target.name][fromState];
-        if (!handler && this.config.requireHandler) {
-            throw new Error(`No handler registered for: ${target.name}: enter ${fromState}`);
-        }
-
-        context.selfExit(fromState, handler);
+        context.selfExit();
     }
 
     private execUpdate(target: Node, state: State, delta: number): void {
         let context = this.contextOf[target.name];
 
-        let handler = this.handlerOf[target.name][state];
-        if (!handler && this.config.requireHandler) {
-            throw new Error(`No handler registered for: ${target.name}: enter ${state}`);
-        }
-
-        context.selfUpdate(state, handler, delta);
+        context.selfUpdate(delta);
 
         if (this.queueOf[target.name].length > 0) {
             this.run(target);
@@ -419,19 +490,28 @@ class Context {
         let fromName =
             source === target    ? '__self__'   :
             source === this.node ? '__parent__' : source.name;
+
+        let prevStateContext = this.contextOf[target.name] as StateContext;
+
         let guard: Guard = {
             from: fromName,
             cancel: () => {
-                //TODO
+                if (prevStateContext) {
+                    prevStateContext.machineState = MachineState.NONE;
+                }
+
+                let guardContext = this.contextOf[target.name];
+                this.contextOf[target.name] = prevStateContext;
+                guardContext.selfExit();
             },
             proceed: () => {
-                this.machineState = MachineState.EXIT;
-                //--------
-                if (handler.exit) {
-                    handler.exit();
+                if (prevStateContext) {
+                    prevStateContext.machineState = MachineState.NONE;
                 }
-                //--------
-                this.machineState = MachineState.NONE;
+
+                let guardContext = this.contextOf[target.name];
+                this.contextOf[target.name] = prevStateContext;
+                guardContext.selfExit();
 
                 let queue = this.queueOf[target.name];
                 if (queue.length > 0) {
@@ -446,25 +526,14 @@ class Context {
             }
         };
 
-        this.machineState = MachineState.ENTER;
-        //--------
-        let enterRes = null;
-        if (handler.enter) {
-            enterRes = handler.enter(guard);
+        // TODO - store dummy context instead of undefined
+        if (prevStateContext) {
+            prevStateContext.machineState = MachineState.GUARD;
         }
 
-        if (enterRes === true) {
-            guard.proceed();
-        }
-        else if (isPartialHandler(enterRes)) {
-            handler.update = enterRes.update || null;
-            handler.exit = enterRes.exit || null;
-        }
-        else if (isFunction(enterRes)) {
-            handler.exit = enterRes;
-        }
-        //--------
-        this.machineState = MachineState.NONE;
+        let guardContext = new GuardContext(guard, handler);
+        this.contextOf[target.name] = guardContext;
+        guardContext.selfEnter();
     }
 
     private execCommand(transCommand: TransCommand): void {
@@ -541,9 +610,9 @@ class Context {
         this.parent.schedule(source, target, fromState, toState, data);
     }
 
-    when(name: string, state: State, handlerOrFunc: Partial<StateHandler> | StateEnterFunc): Context;
-    when(name: string, transition: Transition, handlerOrFunc: Partial<TransHandler> | TransEnterFunc): Context;
-    when(name: string, stateOrTransition: any, handlerOrFunc: any): Context {
+    when(name: string, state: State, handlerOrFunc: Partial<StateHandler> | StateEnterFunc): StateContext;
+    when(name: string, transition: Transition, handlerOrFunc: Partial<GuardHandler> | GuardEnterFunc): StateContext;
+    when(name: string, stateOrTransition: any, handlerOrFunc: any): StateContext {
         let target = this.nodeOf[name];
         if (!target) {
             throw new Error(`Name doesn't exist in this context: ${name}`);
@@ -555,7 +624,7 @@ class Context {
                 throw new Error(`${name} doesn't have transition: ${from} -> ${to}`);
             }
 
-            let handler: TransHandler = null;
+            let handler: GuardHandler = null;
             if (isPartialHandler(handlerOrFunc)) {
                 handler = {
                     enter: handlerOrFunc.enter,
@@ -565,7 +634,7 @@ class Context {
             }
             else if (isFunction(handlerOrFunc)) {
                 handler = {
-                    enter: handlerOrFunc as TransEnterFunc,
+                    enter: handlerOrFunc as GuardEnterFunc,
                     update: null,
                     exit: null
                 };
@@ -622,7 +691,7 @@ class Context {
 
     on(request: EnterReq, func: StateEnterFunc): void;
     on(request: ExitReq, func: StateExitFunc): void;
-    on(request: BetweenReq, func: TransEnterFunc): void;
+    on(request: BetweenReq, func: GuardEnterFunc): void;
     on(request: Request, func: Function): void {
         if (isEnterReq(request)) {
             this.when(request.name, request.state, func as StateEnterFunc);
@@ -632,20 +701,16 @@ class Context {
         }
         else if (isBetweenReq(request)) {
             let transition = makeTransition(request.from, request.to);
-            this.when(request.name, transition, func as TransEnterFunc);
+            this.when(request.name, transition, func as GuardEnterFunc);
         }
     }
 
     update(delta: number): void {
-        this.parent.execUpdate(this.node, this.state, delta);
+        this.selfUpdate(delta);
     }
 
     configure(config: HSMConfig): void {
-        this.config = config;
-
-        for (let name in this.contextOf) {
-            this.contextOf[name].configure(config);
-        }
+        this.selfConfigure(config);
     }
 }
 
@@ -656,12 +721,12 @@ export interface HSMConfig {
 
 export class HSM {
     private static ROOT_NAME = '__sentinel__';
-    public readonly context: Context;
+    public readonly context: StateContext;
     public readonly config: HSMConfig;
 
     private constructor(nodes: Node[]) {
         let sentinel = new Node(HSM.ROOT_NAME, [], nodes);
-        this.context = new Context(sentinel);
+        this.context = new StateContext(sentinel);
         this.config = {
             debug: false,
             requireHandler: false
@@ -729,7 +794,7 @@ export class FSM {
     }
 
     when(state: State, handlerOrFunc: Partial<StateHandler> | StateEnterFunc): FSM;
-    when(transition: Transition, handlerOrFunc: Partial<TransHandler> | TransEnterFunc): FSM;
+    when(transition: Transition, handlerOrFunc: Partial<GuardHandler> | GuardEnterFunc): FSM;
     when(stateOrTransition: any, handlerOrFunc: any): FSM {
         this.hsm.context.when(FSM.ROOT_NAME, stateOrTransition, handlerOrFunc);
         return this;
