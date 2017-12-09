@@ -49,54 +49,12 @@ type GuardEnterFunc = EnterFunc<Guard>;
 type GuardExitFunc = ExitFunc<Guard>;
 type GuardHandler = Handler<Guard>;
 
-interface Wrapper {
-    name: string;
-    enter: (state: State) => EnterReq;
-    exit: (state: State) => ExitReq;
-    between: (from: State, to: State) => BetweenReq;
-}
-
-interface Request {
-    __type: 'enter' | 'exit' | 'between';
-}
-
-interface EnterReq extends Request {
-    __type: 'enter';
-    name: string;
-    state: State;
-}
-
-interface ExitReq extends Request {
-    __type: 'exit';
-    name: string;
-    state: State;
-}
-
-interface BetweenReq extends Request {
-    __type: 'between';
-    name: string;
-    from: State;
-    to: State;
-}
-
 function isArray(obj: any): obj is Array<any> {
     return Array.isArray(obj);
 }
 
 function isFunction(obj: any): obj is ((...args: any[]) => any) {
     return typeof obj === 'function';
-}
-
-function isEnterReq(req: Request): req is EnterReq {
-    return req.__type === 'enter';
-}
-
-function isExitReq(req: Request): req is ExitReq {
-    return req.__type === 'exit';
-}
-
-function isBetweenReq(req: Request): req is BetweenReq {
-    return req.__type === 'between';
 }
 
 function isHandler<T>(obj: any): obj is Handler<T> {
@@ -689,37 +647,6 @@ class StateContext implements Context {
         }
 
         return this;
-    }
-
-    wrap(name: string): Wrapper {
-        return {
-            name,
-            enter: (state: State): EnterReq => {
-                return { __type: 'enter', name, state };
-            },
-            exit: (state: State): ExitReq => {
-                return { __type: 'exit', name, state };
-            },
-            between: (from: State, to: State): BetweenReq => {
-                return { __type: 'between', name, from, to };
-            }
-        }
-    }
-
-    on(request: EnterReq, func: StateEnterFunc): void;
-    on(request: ExitReq, func: StateExitFunc): void;
-    on(request: BetweenReq, func: GuardEnterFunc): void;
-    on(request: Request, func: Function): void {
-        if (isEnterReq(request)) {
-            this.when(request.name, request.state, func as StateEnterFunc);
-        }
-        else if (isExitReq(request)) {
-            //TODO
-        }
-        else if (isBetweenReq(request)) {
-            let transition = makeTransition(request.from, request.to);
-            this.when(request.name, transition, func as GuardEnterFunc);
-        }
     }
 
     update(delta: number): void {
