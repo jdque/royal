@@ -7,6 +7,7 @@ enum MachineState {
     ENTER,
     EXIT,
     UPDATE,
+    RESTORE,
     GUARD,
 }
 
@@ -15,7 +16,7 @@ interface TransCommand {
     target: Node;
     fromState: State;
     toState: State;
-    data?: object;
+    data: object;
 }
 
 interface EnterFunc<T> {
@@ -273,6 +274,13 @@ class GuardContext implements Context {
     }
 }
 
+interface StateJSON {
+    name: string;
+    state: string;
+    data: any;
+    children: Array<StateJSON>;
+}
+
 class StateContext implements Context {
     private parent: StateContext;
     private node: Node;
@@ -384,6 +392,29 @@ class StateContext implements Context {
         this.machineState = MachineState.IDLE;
     }
 
+    selfRestore(json: StateJSON) {
+        this.machineState = MachineState.RESTORE;
+        //--------
+        let enterRes = null;
+        if (this.handler && this.handler.enter) {
+            enterRes = this.handler.enter(this);
+        }
+
+        if (isPartialHandler(enterRes)) {
+            this.handler.update = enterRes.update || null;
+            this.handler.exit = enterRes.exit || null;
+        }
+        else if (isFunction(enterRes)) {
+            this.handler.exit = enterRes;
+        }
+
+        for (let child of json.children) {
+            this.execRestore(child);
+        }
+        //--------
+        this.machineState = MachineState.IDLE;
+    }
+
     selfConfigure(config: HSMConfig) {
         this.config = config;
 
@@ -426,6 +457,23 @@ class StateContext implements Context {
         if (this.queueOf[target.name].length > 0) {
             this.run(target);
         }
+    }
+
+    private execRestore(json: StateJSON): void {
+        let target = this.nodeOf[json.name];
+        let toState = json.state;
+        let data = json.data;
+
+        let handler = this.handlerOf[target.name][toState];
+        if (!handler && this.config.requireHandler) {
+            throw new Error(`No handler registered for: ${target.name}: enter ${toState}`);
+        }
+
+        let context = new StateContext(target, this, toState, handler, data);
+        this.contextOf[target.name] = context;
+        this.stateOf[target.name] = toState;
+
+        context.selfRestore(json);
     }
 
     private execTransition(transCommand: TransCommand): void {
@@ -519,7 +567,7 @@ class StateContext implements Context {
         }
     }
 
-    private schedule(source: Node, target: Node, fromState: State, toState: State, data?: object): void {
+    private schedule(source: Node, target: Node, fromState: State, toState: State, data: object): void {
         if (!target) {
             throw new Error(`Name doesn't exist in state ${this.state}: ${target.name}`);
         }
@@ -546,6 +594,9 @@ class StateContext implements Context {
         if (this.machineState === MachineState.DEAD) {
             throw new Error("Context was called after it has exited");
         }
+        if (this.machineState === MachineState.RESTORE) {
+            return;
+        }
 
         let source = this.node;
         let target = this.nodeOf[name];
@@ -559,6 +610,9 @@ class StateContext implements Context {
         if (this.machineState === MachineState.DEAD) {
             throw new Error("Context was called after it has exited");
         }
+        if (this.machineState === MachineState.RESTORE) {
+            return;
+        }
 
         let source = this.node;
         let target = this.parent.nodeOf[name];
@@ -571,6 +625,9 @@ class StateContext implements Context {
     set(state: State, data?: object): void {
         if (this.machineState === MachineState.DEAD) {
             throw new Error("Context was called after it has exited");
+        }
+        if (this.machineState === MachineState.RESTORE) {
+            return;
         }
 
         let source = this.node;
@@ -653,6 +710,9 @@ class StateContext implements Context {
         if (this.machineState === MachineState.DEAD) {
             throw new Error("Context was called after it has exited");
         }
+        if (this.machineState === MachineState.RESTORE) {
+            return;
+        }
 
         this.selfUpdate(delta);
     }
@@ -661,8 +721,22 @@ class StateContext implements Context {
         if (this.machineState === MachineState.DEAD) {
             throw new Error("Context was called after it has exited");
         }
+        if (this.machineState === MachineState.RESTORE) {
+            return;
+        }
 
         this.selfConfigure(config);
+    }
+
+    restore(json: StateJSON): void {
+        if (this.machineState === MachineState.DEAD) {
+            throw new Error("Context was called after it has exited");
+        }
+        if (this.machineState === MachineState.RESTORE) {
+            return;
+        }
+
+        this.selfRestore(json);
     }
 }
 
@@ -688,6 +762,10 @@ export class HSM {
 
     static create(...nodes: Node[]): HSM {
         return new HSM(nodes);
+    }
+
+    restore(json: StateJSON) {
+        this.context.restore(json);
     }
 
     configure(config: Partial<HSMConfig>): void {
